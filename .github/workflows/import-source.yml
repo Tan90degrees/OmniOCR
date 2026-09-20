@@ -1,0 +1,37 @@
+name: Import OmniOCR source bundle
+on:
+  push:
+    branches: [feat/ascend-ocr-framework]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    if: github.ref == 'refs/heads/feat/ascend-ocr-framework'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Unpack verified V2 sources into branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .bootstrap/part00.b64 ]; then
+            echo 'No source bundle queued'
+            exit 0
+          fi
+          cat .bootstrap/part*.b64 | base64 --decode > /tmp/omniocr-source.tar.xz
+          echo 'efb034f135e76b088a5465932bd4f53b35d3c923e2305e6ad2f9847a5b295e83  /tmp/omniocr-source.tar.xz' | sha256sum --check -
+          tar -tJf /tmp/omniocr-source.tar.xz | tee /tmp/source-list.txt
+          if grep -Eq '(^/|(^|/)\.\.(/|$))' /tmp/source-list.txt; then
+            echo 'Unsafe archive path'; exit 1
+          fi
+          tar -xJf /tmp/omniocr-source.tar.xz -C .
+          rm -rf .bootstrap
+          rm .github/workflows/import-source.yml
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: import complete OmniOCR Ascend C++ framework V2 source'
+          git push origin HEAD:feat/ascend-ocr-framework
