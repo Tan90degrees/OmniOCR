@@ -34,10 +34,17 @@ Image Image::load(const fs::path& p, uint64_t max_pixels) {
     return out;
 }
 Image Image::crop(const std::array<double, 4>& b) const {
-    const int x1 = std::clamp(int(std::floor(b[0])), 0, width);
-    const int y1 = std::clamp(int(std::floor(b[1])), 0, height);
-    const int x2 = std::clamp(int(std::ceil(b[2])), 0, width);
-    const int y2 = std::clamp(int(std::ceil(b[3])), 0, height);
+    // This is also a public API: a caller may supply boxes without parse_layout().
+    // Clamp doubles BEFORE converting to int, to avoid undefined behavior for huge values.
+    if (width <= 0 || height <= 0 || rgb.size() != size_t(width) * size_t(height) * 3)
+        throw std::runtime_error("invalid source image");
+    for (double coordinate : b)
+        if (!std::isfinite(coordinate)) throw std::runtime_error("non-finite crop coordinate");
+    const int x1 = std::clamp(int(std::floor(std::clamp(b[0], 0., double(width)))), 0, width);
+    const int y1 = std::clamp(int(std::floor(std::clamp(b[1], 0., double(height)))), 0, height);
+    const int x2 = std::clamp(int(std::ceil(std::clamp(b[2], 0., double(width)))), 0, width);
+    const int y2 = std::clamp(int(std::ceil(std::clamp(b[3], 0., double(height)))), 0, height);
+    if (x2 <= x1 || y2 <= y1) throw std::runtime_error("empty or inverted crop box");
     auto out = allocate(x2 - x1, y2 - y1);
     for (int y = 0; y < out.height; ++y)
         std::copy_n(rgb.data() + (size_t(y + y1) * width + x1) * 3,
