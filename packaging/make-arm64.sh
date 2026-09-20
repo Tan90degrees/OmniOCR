@@ -10,7 +10,7 @@ cp -a "$stage/omniocr" "$dest/bin/"
 cp -a "$root/configs/." "$dest/configs/"
 cp -a "$root/docs/." "$dest/docs/"
 cp -a "$root/README.md" "$dest/"
-for name in pdfinfo pdftoppm soffice; do
+for name in pdfinfo pdftoppm; do
   path="$(command -v "$name")"
   cp -L "$path" "$dest/bin/$name"
 done
@@ -24,7 +24,13 @@ for directory in /usr/share/libreoffice /usr/share/poppler /usr/share/fonts /etc
 done
 # LibreOffice discovers its install tree relative to its own executable.
 # Keep all bundled LO libraries together, and use a wrapper for its executable.
-cp -L /usr/lib/libreoffice/program/soffice.bin "$dest/bin/soffice.bin"
+cat > "$dest/bin/soffice" <<\'SH\'
+#!/usr/bin/env bash
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$here/lib/libreoffice/program/soffice" "$@"
+SH
+chmod +x "$dest/bin/soffice"
 # Gather ELF DT_NEEDED dependencies recursively, including dependencies of LO's
 # dynamically opened filters (which may not be visible from soffice.bin alone).
 mapfile -d '' binaries < <(find "$dest/bin" "$dest/lib/libreoffice" -type f -print0)
