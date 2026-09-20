@@ -4,6 +4,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 
@@ -152,6 +153,13 @@ void fallback_test() {
 }
 void image_process_test() {
     Image i{2, 1, {255,0,0, 0,0,255}};
+    auto clipped = i.crop({-1e300, 0, 1e300, 1});
+    expect(clipped.width == 2 && clipped.height == 1 && clipped.rgb == i.rgb,
+           "finite out-of-range crop must clamp before integer conversion");
+    throws([&] { i.crop({std::numeric_limits<double>::quiet_NaN(), 0, 1, 1}); });
+    throws([&] { i.crop({2, 0, 1, 1}); });
+    throws([&] { i.crop({3, 0, 4, 1}); });
+    throws([&] { Image{2, 1, {255}}.crop({0, 0, 1, 1}); });
     auto rotated = i.rotate(90);
     expect(rotated.width == 1 && rotated.height == 2 && rotated.rgb[2] == 255, "CCW rotation");
     expect(base64({0, 1, 2, 3}) == "AAECAw==", "base64 padding");
