@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "document": {"dpi": 150, "max_pages": 1000, "max_pixels": 40000000, "timeout_seconds": 120},
+  "execution": {"workers": 8, "on_error": "fail"},
+  "layout": {
+    "provider": "mineru", "model": "mineru", "image_size": [1036, 1036],
+    "prompt": "\nLayout Detection:",
+    "type_map": {"title": "title", "equation": "formula", "equation_block": "formula", "list": "text", "unknown": "image", "image_block": "image"}
+  },
+  "models": {
+    "mineru": {
+      "backend": "vllm", "instances": 4,
+      "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "model": "mineru", "timeout_seconds": 180, "acquire_timeout_ms": 240000,
+      "system_prompt": "You are a helpful assistant.",
+      "parameters": {"max_tokens": 8192, "temperature": 0, "top_p": 0.01, "skip_special_tokens": false}
+    }
+  },
+  "routes": {
+    "title": {"model": "mineru", "prompt": "\nText Recognition:"},
+    "text": {"model": "mineru", "prompt": "\nText Recognition:"},
+    "table": {"model": "mineru", "prompt": "\nTable Recognition:"},
+    "formula": {"model": "mineru", "prompt": "\nFormula Recognition:"},
+    "image": {"action": "image"},
+    "chart": {"model": "mineru", "prompt": "\nImage Analysis:", "save_crop": true},
+    "inline_formula": {"action": "skip"},
+    "header": {"action": "skip"},
+    "footer": {"action": "skip"},
+    "*": {"model": "mineru", "prompt": "\nText Recognition:"}
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "document": {"dpi": 150, "max_pages": 1000, "max_pixels": 40000000, "timeout_seconds": 120},
+  "execution": {"workers": 4, "on_error": "fail"},
+  "layout": {"provider": "normalized", "model": "layout", "coordinates": "normalized"},
+  "models": {
+    "layout": {
+      "backend": "mock", "instances": 1,
+      "response": {"boxes": [
+        {"type": "title", "bbox": [0.05, 0.05, 0.95, 0.2], "order": 0},
+        {"type": "text", "bbox": [0.05, 0.25, 0.95, 0.7], "order": 1},
+        {"type": "image", "bbox": [0.05, 0.75, 0.95, 0.95], "order": 2}
+      ]}
+    },
+    "shared_ocr": {"backend": "mock", "instances": 2, "response": {"text": "[MOCK] Replace this backend with a real model."}}
+  },
+  "routes": {
+    "title": {"model": "shared_ocr", "prompt": "Text Recognition:"},
+    "text": {"model": "shared_ocr", "prompt": "Text Recognition:"},
+    "image": {"action": "image"},
+    "*": {"model": "shared_ocr"}
+  }
+}
