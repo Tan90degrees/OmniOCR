@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Run on a native Ubuntu 22.04 AArch64 GitHub runner after installing dependencies.
+# Run on a native Ubuntu 24.04 AArch64 GitHub runner after installing dependencies.
 if [[ "$(uname -m)" != "aarch64" ]]; then echo "native ARM64 runner required" >&2; exit 1; fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 stage="${1:?usage: bash packaging/make-arm64.sh BUILD_DIR OUTPUT_DIR}"
@@ -24,7 +24,7 @@ for directory in /usr/share/libreoffice /usr/share/poppler /usr/share/fonts /etc
 done
 # LibreOffice discovers its install tree relative to its own executable.
 # Keep all bundled LO libraries together, and use a wrapper for its executable.
-cat > "$dest/bin/soffice" <<\'SH\'
+cat > "$dest/bin/soffice" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
