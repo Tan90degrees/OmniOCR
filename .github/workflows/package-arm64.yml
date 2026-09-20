@@ -2,6 +2,8 @@ name: ARM64 offline package
 on:
   workflow_dispatch:
   push:
+    branches:
+      - feat/ascend-ocr-framework
     tags:
       - 'v*'
 permissions:
