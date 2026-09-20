@@ -29,7 +29,7 @@ jobs:
           fi
           tar -xJf /tmp/omniocr-source.tar.xz -C .
           rm -rf .bootstrap
-          rm .github/workflows/import-source.yml
+          rm -f .github/workflows/ci.yml
           git add -A
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
