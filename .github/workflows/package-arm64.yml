@@ -1,0 +1,56 @@
+name: ARM64 offline package
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+jobs:
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and document dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core
+      - name: Build native ARM64 executable
+        run: |
+          test "$(uname -m)" = aarch64
+          cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release -DOMNIOCR_WITH_ACL=OFF -DOMNIOCR_WITH_ONNX=OFF
+          cmake --build build-arm64 -j2
+          ctest --test-dir build-arm64 --output-on-failure
+      - name: Assemble offline archive and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(git describe --tags --always | tr -c 'A-Za-z0-9._-' '-')"
+          name="omniocr-${version}-linux-arm64-offline"
+          bash packaging/make-arm64.sh build-arm64 "$RUNNER_TEMP/$name"
+          (cd "$RUNNER_TEMP/$name" && ./verify.sh)
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          root=Path(os.environ['RUNNER_TEMP'])
+          bundle=next(root.glob('omniocr-*-linux-arm64-offline'))
+          (root/'fixture.ppm').write_bytes(b'P6\n20 10\n255\n'+b'\xff'*600)
+          os.system('true')
+          import subprocess
+          subprocess.run([str(bundle/'run.sh'),'--config',str(bundle/'configs/demo.json'),'--input',str(root/'fixture.ppm'),'--output',str(root/'smoke-output')],check=True)
+          assert (root/'smoke-output/result.json').is_file()
+          PY
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/$name.tar.gz" "$name"
+          (cd "$RUNNER_TEMP" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "ARCHIVE=$RUNNER_TEMP/$name.tar.gz" >> "$GITHUB_ENV"
+          echo "CHECKSUM=$RUNNER_TEMP/$name.tar.gz.sha256" >> "$GITHUB_ENV"
+      - name: Upload ARM64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniocr-linux-arm64-offline
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.CHECKSUM }}
+          if-no-files-found: error
+          retention-days: 30
