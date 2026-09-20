@@ -41,7 +41,7 @@ class Handler(BaseHTTPRequestHandler):
             png_url = request["messages"][-1]["content"][0]["image_url"]["url"]
             assert png_url.startswith("data:image/png;base64,")
             png = base64.b64decode(png_url.split(",", 1)[1], validate=True)
-            assert png.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+            assert png.startswith(b"\x89PNG\r\n\x1a\n")
             assert struct.unpack(">II", png[16:24]) == (10, 10)
             with self.lock:
                 Handler.calls[self.path] += 1
@@ -79,7 +79,7 @@ def run(binary):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "input.ppm"
-            image.write_bytes(b"P6\\n20 10\\n255\\n" + b"\\xff" * 600)
+            image.write_bytes(b"P6\n20 10\n255\n" + b"\xff" * 600)
             endpoint = f"http://127.0.0.1:{server.server_port}"
             cfg = {
                 "version": 1,
