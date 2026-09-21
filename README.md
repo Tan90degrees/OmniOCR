@@ -90,6 +90,24 @@ cmake --build build-ascend -j4
 
 此命令检查配置结构和引用关系，不加载权重、不探测服务。正常完成返回 0；致命错误返回 1；`on_error: record` 下输出部分结果并返回 2。转换/布局失败始终属于致命错误。失败运行可能留下已写出的裁剪文件，重试请使用新的输出目录。
 
+## REST API 服务
+
+`omniocr-server` 是 C++ 常驻进程，可通过 HTTP 提交服务器允许目录下的文件路径，也可直接上传 PDF、图片或 Office 文件的原始二进制。提交后返回任务 ID，客户端异步查询状态和 JSON / Markdown 结果；运行期间新增文件进入**共享的页级优先级队列**。不必等待一个文件处理完才能提交下一个。
+
+```bash
+cmake -S . -B build -DOMNIOCR_WITH_SERVER=ON
+cmake --build build -j4
+./build/omniocr-server --config configs/demo.json --data-dir /tmp/omniocr-rest \
+  --allowed-input-root /data/documents --host 127.0.0.1 --port 8080
+curl -X POST http://127.0.0.1:8080/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"/data/documents/example.pdf","priority":100}'
+curl -X POST 'http://127.0.0.1:8080/v1/jobs/upload?extension=.pdf&priority=100' \
+  -H 'Content-Type: application/octet-stream' --data-binary @./example.pdf
+```
+
+编译服务端需要 `libmicrohttpd` 开发包；默认只监听本机地址，生产部署请启用 `--api-key-env` 并在 HTTPS 反向代理后加用户鉴权、限流。上述 demo 配置仅用于流程演示，使用 Ascend 310P3 + DocLayout/OvisOCR2 时需要实际的 ACL 和 vLLM 配置。完整接口、轮询结果、容量与安全约束详见 [REST 服务说明](docs/server.md)。
+
 ## 多文件优先级与 PDF 按页调度
 
 批处理使用**一个** Pipeline 和共享模型池，不需要对每个文件单独启动 OmniOCR 进程。
