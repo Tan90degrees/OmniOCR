@@ -10,6 +10,12 @@
 
 namespace omniocr {
 namespace {
+void validate_source(const Image& image) {
+    if (image.width <= 0 || image.height <= 0 ||
+        uint64_t(image.width) * uint64_t(image.height) > std::numeric_limits<size_t>::max() / 3 ||
+        image.rgb.size() != size_t(image.width) * size_t(image.height) * 3)
+        throw std::runtime_error("invalid source image");
+}
 Image allocate(int w, int h) {
     if (w <= 0 || h <= 0 || uint64_t(w) * h > std::numeric_limits<size_t>::max() / 3)
         throw std::runtime_error("invalid image dimensions");
@@ -36,8 +42,7 @@ Image Image::load(const fs::path& p, uint64_t max_pixels) {
 Image Image::crop(const std::array<double, 4>& b) const {
     // This is also a public API: a caller may supply boxes without parse_layout().
     // Clamp doubles BEFORE converting to int, to avoid undefined behavior for huge values.
-    if (width <= 0 || height <= 0 || rgb.size() != size_t(width) * size_t(height) * 3)
-        throw std::runtime_error("invalid source image");
+    validate_source(*this);
     for (double coordinate : b)
         if (!std::isfinite(coordinate)) throw std::runtime_error("non-finite crop coordinate");
     const int x1 = std::clamp(int(std::floor(std::clamp(b[0], 0., double(width)))), 0, width);
@@ -52,6 +57,7 @@ Image Image::crop(const std::array<double, 4>& b) const {
     return out;
 }
 Image Image::resize(int w, int h) const {
+    validate_source(*this);
     auto out = allocate(w, h);
     for (int y = 0; y < h; ++y) {
         const double sy = std::clamp((y + .5) * height / h - .5, 0., double(height - 1));
@@ -70,6 +76,7 @@ Image Image::resize(int w, int h) const {
     return out;
 }
 Image Image::rotate(int degrees) const {
+    validate_source(*this);
     if (!degrees) return *this;
     if (degrees != 90 && degrees != 180 && degrees != 270) throw std::runtime_error("invalid rotation");
     // Public angle follows MinerU/PIL: positive values rotate counterclockwise.
@@ -83,6 +90,7 @@ Image Image::rotate(int degrees) const {
     return out;
 }
 std::vector<uint8_t> Image::png() const {
+    validate_source(*this);
     std::vector<uint8_t> bytes;
     auto append = [](void* ctx, void* data, int size) {
         auto& v = *static_cast<std::vector<uint8_t>*>(ctx);
