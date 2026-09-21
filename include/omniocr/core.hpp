@@ -80,11 +80,31 @@ public:
 void read_document(const fs::path&, const Json& settings,
                    const std::function<void(int, const Image&)>& consume);
 
+// Higher priority pages are selected before lower priority ready pages.
+// Priority affects only waiting pages; running inference is not preempted.
+struct BatchJob {
+    fs::path input, output_dir;
+    int priority = 0;
+};
+struct BatchOptions {
+    int page_workers = 0;          // 0: use execution.workers
+    int max_active_documents = 2;  // concurrent document readers/converters
+    int max_queued_pages = 2;      // global queued images; bounds memory
+};
+struct BatchResult {
+    Document document;
+    std::string error;            // document-level failure; other jobs continue
+};
 class Pipeline {
 public:
     explicit Pipeline(Json config, ModelFactory factory = make_model);
     Document run(const fs::path& input, const fs::path& output_dir);
+    // One shared model registry, bounded page workers, independent document results.
+    // Returned entries match the original job ordering; page numbers remain ascending.
+    std::vector<BatchResult> run_batch(const std::vector<BatchJob>& jobs,
+                                       BatchOptions options = {});
 private:
+    Page process_page(int number, const Image& image, const fs::path& output_dir, int box_workers);
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
 };
