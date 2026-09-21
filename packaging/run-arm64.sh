@@ -8,4 +8,7 @@ export FONTCONFIG_FILE="${FONTCONFIG_FILE:-/etc/fonts/fonts.conf}"
 export XDG_DATA_DIRS="$here/rootfs/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
 # The C++ document reader launches 'soffice' via PATH; this wrapper also handles
 # the Office launcher by placing the bundled LibreOffice program/ directory first.
+if [[ "$(basename "$0")" == "server.sh" ]]; then
+  exec "$here/bin/omniocr-server" "$@"
+fi
 exec "$here/bin/omniocr" "$@"
