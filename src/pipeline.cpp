@@ -11,16 +11,12 @@ Pipeline::Pipeline(Json config, ModelFactory factory) : config_(std::move(config
     validate_config(config_);
     models_ = std::make_unique<ModelRegistry>(config_.at("models"), std::move(factory));
 }
-Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
-    if (fs::exists(output_dir) && !fs::is_empty(output_dir)) throw std::runtime_error("output directory must be empty");
-    fs::create_directories(output_dir);
-    Document doc; doc.source = fs::absolute(input).string();
+Page Pipeline::process_page(int number, const Image& image, const fs::path& output_dir,
+                            int box_workers) {
     const auto execution = config_.value("execution", Json::object());
     const auto& layout = config_.at("layout");
     const auto& routes = config_.at("routes");
     const bool record = execution.value("on_error", "fail") == "record";
-    const int workers = execution.value("workers", 4);
-    read_document(input, config_.value("document", Json::object()), [&](int number, const Image& image) {
         Image small;
         const Image* layout_image = &image;
         if (layout.contains("image_size")) {
@@ -92,12 +88,22 @@ Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
         };
         std::vector<std::thread> threads;
         // Join existing workers if thread creation throws, before any page storage is released.
-        try { for (size_t i = 0; i < std::min(size_t(workers), boxes.size()); ++i) threads.emplace_back(work); }
+        try { for (size_t i = 0; i < std::min(size_t(box_workers), boxes.size()); ++i) threads.emplace_back(work); }
         catch (...) { stop = true; for (auto& t : threads) t.join(); throw; }
         for (auto& t : threads) t.join();
         if (error) std::rethrow_exception(error);
-        doc.pages.push_back(std::move(page));
-    });
+    return page;
+}
+Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
+    if (fs::exists(output_dir) && !fs::is_empty(output_dir))
+        throw std::runtime_error("output directory must be empty");
+    fs::create_directories(output_dir);
+    Document doc; doc.source = fs::absolute(input).string();
+    const int box_workers = config_.value("execution", Json::object()).value("workers", 4);
+    read_document(input, config_.value("document", Json::object()),
+        [&](int number, const Image& image) {
+            doc.pages.push_back(process_page(number, image, output_dir, box_workers));
+        });
     return doc;
 }
 } // namespace omniocr
