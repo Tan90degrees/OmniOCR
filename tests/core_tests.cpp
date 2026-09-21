@@ -1,4 +1,6 @@
 #include "omniocr/tensor.hpp"
+#include <algorithm>
+#include <mutex>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -187,6 +189,60 @@ void table_fallback_test() {
     c["execution"]["on_error"] = "fail";
     throws([&] { Pipeline(c).run(temp.path / "table.png", temp.path / "fail"); });
 }
+void batch_test() {
+    TempDir temp;
+    auto make_image = [&](const char* name, uint8_t pixel) {
+        auto source = image();
+        std::fill(source.rgb.begin(), source.rgb.end(), pixel);
+        auto bytes = source.png();
+        std::ofstream out(temp.path / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+    };
+    make_image("low.png", 20);
+    make_image("high.png", 200);
+    auto conf = config();
+    struct State { std::mutex mutex; std::vector<uint8_t> layout_order; } state;
+    struct Instrumented : Model {
+        Json answer;
+        State& state;
+        Instrumented(Json response, State& s) : answer(std::move(response)), state(s) {}
+        Json infer(const Image& img, const std::string&) override {
+            if (answer.contains("boxes")) {
+                std::lock_guard<std::mutex> guard(state.mutex);
+                state.layout_order.push_back(img.rgb.front());
+            }
+            return answer;
+        }
+    };
+    Pipeline pipeline(conf, [&](const Json& model, size_t) {
+        return std::make_unique<Instrumented>(model.at("response"), state);
+    });
+    const std::vector<BatchJob> jobs{
+        {temp.path / "low.png", temp.path / "out-low", 1},
+        {temp.path / "high.png", temp.path / "out-high", 10},
+        {temp.path / "missing.png", temp.path / "out-missing", -5}
+    };
+    const auto results = pipeline.run_batch(jobs, {1, 1, 1});
+    expect(results.size() == 3 && state.layout_order.size() == 2 &&
+           state.layout_order[0] == 200 && state.layout_order[1] == 20,
+           "batch high-priority document admission");
+    expect(results[0].error.empty() && results[1].error.empty() &&
+           results[0].document.pages.size() == 1 && results[1].document.pages.size() == 1 &&
+           results[0].document.pages[0].number == 1 &&
+           results[1].document.pages[0].regions[0].model == "shared",
+           "batch must preserve input result order and independent documents");
+    expect(results[2].error.find("regular file") != std::string::npos,
+           "invalid document must not fail other batch jobs");
+    write_outputs(results[0].document, jobs[0].output_dir, "both");
+    write_outputs(results[1].document, jobs[1].output_dir, "both");
+    expect(fs::exists(jobs[0].output_dir / "result.json") &&
+           fs::exists(jobs[1].output_dir / "result.json"), "batch output isolation");
+    throws([&] { pipeline.run_batch({
+        {temp.path / "low.png", temp.path / "collision", 1},
+        {temp.path / "high.png", temp.path / "collision" / "child", 10}});
+    });
+    throws([&] { pipeline.run_batch(jobs, {129, 1, 1}); });
+}
 void image_process_test() {
     Image i{2, 1, {255,0,0, 0,0,255}};
     auto clipped = i.crop({-1e300, 0, 1e300, 1});
@@ -212,7 +268,7 @@ void image_process_test() {
 }
 int main() {
     try {
-        layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); image_process_test();
+        layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
