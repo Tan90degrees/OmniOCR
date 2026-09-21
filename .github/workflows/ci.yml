@@ -21,6 +21,7 @@ jobs:
           cmake --build build -j2
           ctest --test-dir build --output-on-failure
           python3 tests/document_integration.py build/omniocr
+          python3 tests/batch_integration.py build/omniocr
           for config in configs/*.json; do build/omniocr --config "$config" --validate; done
   onnx:
     runs-on: ubuntu-24.04
