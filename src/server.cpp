@@ -264,10 +264,22 @@ public:
         : pipeline_(config), document_settings_(config.value("document", Json::object())),
           options_(std::move(options)) {
         fs::create_directories(options_.data_dir / "jobs");
-        for (int i = 0; i < options_.page_workers; ++i)
-            threads_.emplace_back([this] { page_worker(); });
-        for (int i = 0; i < options_.document_workers; ++i)
-            threads_.emplace_back([this] { reader(); });
+        fs::permissions(options_.data_dir / "jobs", fs::perms::owner_all,
+                        fs::perm_options::replace);
+        try {
+            for (int i = 0; i < options_.page_workers; ++i)
+                threads_.emplace_back([this] { page_worker(); });
+            for (int i = 0; i < options_.document_workers; ++i)
+                threads_.emplace_back([this] { reader(); });
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                shutdown_ = true;
+            }
+            changed_.notify_all();
+            for (auto& thread : threads_) thread.join();
+            throw;
+        }
     }
     ~ServerScheduler() {
         {
@@ -280,6 +292,7 @@ public:
     fs::path staging(const std::string& id) {
         const auto dir = options_.data_dir / "jobs" / id;
         if (!fs::create_directory(dir)) throw std::runtime_error("job storage collision");
+        fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace);
         return dir;
     }
     std::string reserve() {
