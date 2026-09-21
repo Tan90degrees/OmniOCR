@@ -31,7 +31,7 @@ if(NOT STB_INCLUDE_DIR)
 endif()
 add_library(omniocr_core
     src/config.cpp src/image.cpp src/model_pool.cpp src/layout.cpp src/document.cpp
-    src/pipeline.cpp src/output.cpp src/table.cpp src/backends/http.cpp src/backends/models.cpp
+    src/pipeline.cpp src/batch.cpp src/output.cpp src/table.cpp src/backends/http.cpp src/backends/models.cpp
     src/backends/tensor.cpp src/backends/onnx.cpp src/backends/acl.cpp)
 target_include_directories(omniocr_core PUBLIC include PRIVATE "${STB_INCLUDE_DIR}")
 target_link_libraries(omniocr_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE CURL::libcurl)
