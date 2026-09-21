@@ -35,7 +35,7 @@ std::vector<Box> parse_layout(const Json& response, const Json& layout, int widt
             for (int i = 0; i < 4; ++i) {
                 const int n = std::stoi((*it)[i + 1].str());
                 if (n > 1000) throw std::runtime_error("MinerU coordinate outside 0..1000");
-                b.bbox[i] = n * (i % 2 ? height : width) / 1000.0;
+                b.bbox[i] = double(n) * double(i % 2 ? height : width) / 1000.0;
             }
             if (b.bbox[0] > b.bbox[2]) std::swap(b.bbox[0], b.bbox[2]);
             if (b.bbox[1] > b.bbox[3]) std::swap(b.bbox[1], b.bbox[3]);
