@@ -1,7 +1,7 @@
 # Linux ARM64 离线包
 
 由 GitHub Actions 的 `ARM64 offline package` 工作流生成。包包含 AArch64 `omniocr`、
-程序依赖的非 glibc 共享库、Poppler 的 `pdfinfo`/`pdftoppm`、LibreOffice、
+可选 REST 服务可执行程序 `omniocr-server`、其启动脚本 `server.sh`、\n程序依赖的非 glibc 共享库、Poppler 的 `pdfinfo`/`pdftoppm`、LibreOffice、
 配置与文档、`run.sh`、`verify.sh`。不包含模型权重、NPU 驱动和 CANN。
 
 运行环境：Linux AArch64、与出包环境兼容的 glibc（构建基线 Ubuntu 24.04 ARM64）、
@@ -23,5 +23,15 @@ cd omniocr-*-linux-arm64-offline
 ONNX/ACL 离线分发须另外提供匹配的 ARM64 SDK/运行时及构建环境；
 NPU 实机验证与普通 ARM64 构建分开。
 
-`verify.sh` 检查本机架构、二进制 ELF 类型、SHA256 清单和 `--help`；
+`verify.sh` 检查本机架构、CLI/REST 二进制 ELF 类型、SHA256 清单和各自的 `--help`；
 Actions 在打包后运行同样的检查和 demo 端到端冒烟测试。
+
+REST 服务的部署示例：
+
+```bash
+export OCR_API_KEY='replace-with-a-strong-secret'
+./server.sh --config configs/demo.json --data-dir /data/omniocr-state \\
+  --allowed-input-root /data/documents --host 127.0.0.1 --port 8080 --api-key-env OCR_API_KEY
+```
+
+当前 ARM64 发布工作流的 REST 二进制与 CLI 一样关闭 ACL/ONNX，适用于 HTTP/vLLM 模型；启用 ACL 的 310P3 实机服务仍需使用与目标 CANN 匹配的 ARM64 SDK 在目标环境编译和验证，不能把普通 ARM64 出包作为 NPU 实测证明。
