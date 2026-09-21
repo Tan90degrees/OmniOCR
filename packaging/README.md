@@ -1,7 +1,8 @@
 # Linux ARM64 离线包
 
 由 GitHub Actions 的 `ARM64 offline package` 工作流生成。包包含 AArch64 `omniocr`、
-可选 REST 服务可执行程序 `omniocr-server`、其启动脚本 `server.sh`、\n程序依赖的非 glibc 共享库、Poppler 的 `pdfinfo`/`pdftoppm`、LibreOffice、
+可选 REST 服务可执行程序 `omniocr-server`、其启动脚本 `server.sh`、
+程序依赖的非 glibc 共享库、Poppler 的 `pdfinfo`/`pdftoppm`、LibreOffice、
 配置与文档、`run.sh`、`verify.sh`。不包含模型权重、NPU 驱动和 CANN。
 
 运行环境：Linux AArch64、与出包环境兼容的 glibc（构建基线 Ubuntu 24.04 ARM64）、
@@ -17,8 +18,7 @@ cd omniocr-*-linux-arm64-offline
 ./run.sh --config configs/demo.json --input /data/example.pdf --output /data/ocr-output
 ```
 
-`run.sh` 通过打包的动态链接器及 `lib/` 优先加载包内库，
-不改变主机的 LD_LIBRARY_PATH。可通过 `--config` 指定任意配置。
+`run.sh` 和 `server.sh` 通过仅修改子进程的 `PATH`、`LD_LIBRARY_PATH` 优先使用包内工具与非 glibc 共享库，仍依赖兼容的宿主动态链接器与 glibc，不修改父 shell 环境。可用 `--config` 指定模型配置；REST API 参见 `docs/server.md`。
 当前发布工作流的 CLI 关闭 ACL/ONNX，仅支持 HTTP/vLLM 和 mock。
 ONNX/ACL 离线分发须另外提供匹配的 ARM64 SDK/运行时及构建环境；
 NPU 实机验证与普通 ARM64 构建分开。
@@ -30,7 +30,7 @@ REST 服务的部署示例：
 
 ```bash
 export OCR_API_KEY='replace-with-a-strong-secret'
-./server.sh --config configs/demo.json --data-dir /data/omniocr-state \\
+./server.sh --config configs/demo.json --data-dir /data/omniocr-state \
   --allowed-input-root /data/documents --host 127.0.0.1 --port 8080 --api-key-env OCR_API_KEY
 ```
 
