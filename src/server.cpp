@@ -106,7 +106,7 @@ class ServerScheduler {
         bool reader_done = false;
         size_t outstanding = 0;
         std::map<int, Page> pages;
-        Document document;
+        std::string source;
     };
     struct Pending {
         std::shared_ptr<Job> job;
@@ -142,7 +142,7 @@ class ServerScheduler {
             return false;
         }
         job->state = "finalizing";
-        output.source = job->document.source;
+        output.source = job->source;
         for (auto& entry : job->pages) output.pages.push_back(std::move(entry.second));
         job->pages.clear();
         return true;
@@ -152,7 +152,6 @@ class ServerScheduler {
             write_outputs(doc, job->output, "both");
             std::lock_guard<std::mutex> guard(mutex_);
             if (job->state == "finalizing") {
-                job->document = doc;
                 job->state = "succeeded";
             }
         } catch (const std::exception& e) {
@@ -298,7 +297,7 @@ public:
         job->id = id; job->input = input;
         job->output = options_.data_dir / "jobs" / id / "output";
         job->priority = priority;
-        job->document.source = fs::absolute(input).string();
+        job->source = fs::absolute(input).string();
         {
             std::lock_guard<std::mutex> guard(mutex_);
             if (jobs_.size() >= options_.max_jobs) throw std::runtime_error("job capacity reached");
