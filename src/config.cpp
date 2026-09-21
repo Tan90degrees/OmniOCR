@@ -1,5 +1,7 @@
 #include "omniocr/core.hpp"
 #include <fstream>
+#include <cstdint>
+#include <limits>
 #include <set>
 #include <stdexcept>
 
@@ -9,12 +11,25 @@ void require(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error("config: " + message);
 }
 void positive(const Json& j, const char* key, int fallback, int max) {
-    const int value = j.value(key, fallback);
-    require(value > 0 && value <= max, std::string(key) + " out of range");
+    if (!j.contains(key)) {
+        require(fallback > 0 && fallback <= max, std::string(key) + " out of range");
+        return;
+    }
+    const auto& value = j.at(key);
+    require(value.is_number_integer() || value.is_number_unsigned(),
+            std::string(key) + " must be an integer");
+    if (value.is_number_unsigned()) {
+        require(value.get<uint64_t>() >= 1 && value.get<uint64_t>() <= uint64_t(max),
+                std::string(key) + " out of range");
+    } else {
+        require(value.get<int64_t>() >= 1 && value.get<int64_t>() <= int64_t(max),
+                std::string(key) + " out of range");
+    }
 }
 }
 void validate_config(const Json& c) {
-    require(c.value("version", 0) == 1, "version must be 1");
+    require(c.contains("version") && c.at("version").is_number_integer() &&
+            c.at("version").get<int64_t>() == 1, "version must be 1");
     const auto& models = c.at("models");
     require(models.is_object() && !models.empty(), "models must be a nonempty object");
     for (const auto& [id, m] : models.items()) {
