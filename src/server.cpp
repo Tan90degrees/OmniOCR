@@ -349,6 +349,7 @@ public:
 namespace {
 struct Request {
     bool upload = false;
+    bool submitted = false;
     bool rejected = false;
     unsigned error_status = 400;
     std::string error;
@@ -366,7 +367,13 @@ struct Http {
         return static_cast<Http*>(context)->handle(conn, url, method, data, size, cls);
     }
     static void completed(void*, MHD_Connection*, void** cls, MHD_RequestTerminationCode) {
-        delete static_cast<Request*>(*cls);
+        auto* request = static_cast<Request*>(*cls);
+        if (request && request->upload && !request->submitted && !request->spool.empty()) {
+            request->file.close();
+            std::error_code ignored;
+            fs::remove_all(request->spool.parent_path(), ignored);
+        }
+        delete request;
         *cls = nullptr;
     }
     MHD_Result handle(MHD_Connection* conn, const std::string& url, const std::string& method,
@@ -441,8 +448,10 @@ struct Http {
             try {
                 if (request->upload) {
                     request->file.close();
+                    if (!request->file) throw std::runtime_error("uploaded file flush failed");
                     if (!request->bytes) throw std::runtime_error("empty upload");
                     scheduler.submit(request->id, request->spool, request->priority);
+                    request->submitted = true;
                     return respond(conn, MHD_HTTP_ACCEPTED,
                         Json{{"id", request->id}, {"status", "queued"},
                              {"status_url", "/v1/jobs/" + request->id}}.dump());
