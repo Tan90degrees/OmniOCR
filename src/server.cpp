@@ -19,6 +19,9 @@
 #include <stdexcept>
 #include <thread>
 #include <sys/stat.h>
+#include <arpa/inet.h>
+#include <cctype>
+#include <iterator>
 
 namespace omniocr {
 namespace {
@@ -89,7 +92,7 @@ MHD_Result respond(MHD_Connection* connection, unsigned status, const std::strin
 MHD_Result failure(MHD_Connection* conn, unsigned code, const std::string& error) {
     return respond(conn, code, Json{{"error", error}}.dump());
 }
-std::sig_atomic_t stopping = 0;
+volatile std::sig_atomic_t stopping = 0;
 extern "C" void stop_server(int) { stopping = 1; }
 } // namespace
 
@@ -559,9 +562,14 @@ int main(int argc, char** argv) {
         ServerScheduler scheduler(config, options);
         Http http{scheduler};
         const auto flags = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_THREAD_PER_CONNECTION;
+        sockaddr_in bind_address{};
+        bind_address.sin_family = AF_INET;
+        bind_address.sin_port = htons(options.port);
+        if (inet_pton(AF_INET, options.host.c_str(), &bind_address.sin_addr) != 1)
+            throw std::runtime_error("invalid IPv4 bind address");
         struct MHD_Daemon* daemon = MHD_start_daemon(flags, options.port, nullptr, nullptr,
-            &Http::handler, &http, MHD_OPTION_CONNECTION_TIMEOUT, 30u,
-            MHD_OPTION_CONNECTION_LIMIT, 64u,
+            &Http::handler, &http, MHD_OPTION_SOCK_ADDR, &bind_address,
+            MHD_OPTION_CONNECTION_TIMEOUT, 30u, MHD_OPTION_CONNECTION_LIMIT, 64u,
             MHD_OPTION_NOTIFY_COMPLETED, &Http::completed, nullptr, MHD_OPTION_END);
         if (!daemon) throw std::runtime_error("could not start HTTP server");
         std::signal(SIGINT, stop_server);
