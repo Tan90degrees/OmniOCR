@@ -67,7 +67,11 @@ Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
                             try {
                                 auto result = models_->infer(candidate, crop, route->value("prompt", "Text Recognition:"));
                                 auto text = result.at("text").get<std::string>();
-                                region.text = std::move(text);
+                                // Decode inside the candidate boundary: malformed table tokens
+                                // must trigger the next model, not bypass route fallback.
+                                std::string decoded = region.box.type == "table" ? table_to_html(text) : text;
+                                region.raw_text = region.box.type == "table" ? text : "";
+                                region.text = std::move(decoded);
                                 region.model = candidate;
                                 recognized = true;
                                 break;
@@ -77,10 +81,6 @@ Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
                             }
                         }
                         if (!recognized) throw std::runtime_error("all recognition models failed: " + failures);
-                        if (region.box.type == "table") {
-                            region.raw_text = region.text;
-                            region.text = table_to_html(region.text);
-                        }
                     }
                 } catch (const std::exception& e) {
                     if (record) region.error = e.what();
