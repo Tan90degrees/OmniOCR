@@ -9,8 +9,37 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from reportlab.pdfgen.canvas import Canvas
+
+
+
+class OCRHandler(BaseHTTPRequestHandler):
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        with OCRHandler.lock:
+            OCRHandler.active += 1
+            OCRHandler.peak = max(OCRHandler.peak, OCRHandler.active)
+        try:
+            time.sleep(.12)
+            data = b'{"text":"REST OCR"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        finally:
+            with OCRHandler.lock:
+                OCRHandler.active -= 1
 
 
 def request(base, route, method="GET", data=None, token="test-token", content_type=None):
@@ -66,6 +95,9 @@ def run(binary):
             pdf.drawString(10, 70, f"Page {page + 1}")
             pdf.showPage()
         pdf.save()
+        inference = ThreadingHTTPServer(("127.0.0.1", 0), OCRHandler)
+        inference_thread = threading.Thread(target=inference.serve_forever, daemon=True)
+        inference_thread.start()
         config = {
             "version": 1,
             "execution": {"workers": 4, "on_error": "fail"},
@@ -75,7 +107,8 @@ def run(binary):
                 "layout": {"backend": "mock", "response": {"boxes": [
                     {"type": "text", "bbox": [0, 0, 1, 1]}
                 ]}},
-                "ocr": {"backend": "mock", "instances": 2, "response": {"text": "REST OCR"}}
+                "ocr": {"backend": "http_json", "instances": 2,
+                        "endpoint": f"http://127.0.0.1:{inference.server_port}/ocr"}
             },
             "routes": {"text": {"model": "ocr"}}
         }
@@ -137,8 +170,12 @@ def run(binary):
                 process.kill()
                 out, err = process.communicate()
                 raise AssertionError("server failed to terminate")
+            inference.shutdown()
+            inference.server_close()
+            inference_thread.join()
             assert process.returncode == 0, (process.returncode, out[-1000:], err[-1000:])
-    print("PASS: REST server path + streamed binary, PDF pages, statuses, auth, path sandbox, limits")
+            assert OCRHandler.peak >= 2, "server must perform multiple page inferences concurrently"
+    print("PASS: REST server path + streamed binary, concurrent PDF pages, statuses, auth, path sandbox, limits")
 
 
 if __name__ == "__main__":
