@@ -13,15 +13,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice
+          sudo apt-get install -y cmake g++ libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice libmicrohttpd-dev
           python3 -m pip install python-docx python-pptx openpyxl reportlab
       - name: Build and test
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIOCR_WITH_SERVER=ON
           cmake --build build -j2
           ctest --test-dir build --output-on-failure
           python3 tests/document_integration.py build/omniocr
           python3 tests/batch_integration.py build/omniocr
+          python3 tests/server_integration.py build/omniocr-server
           for config in configs/*.json; do build/omniocr --config "$config" --validate; done
   onnx:
     runs-on: ubuntu-24.04
