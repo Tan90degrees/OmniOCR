@@ -34,6 +34,10 @@ void layout_test() {
     auto mineru = parse_layout({{"text", "<|box_start|>10 20 900 800<|box_end|><|ref_start|>equation<|ref_end|><|rotate_right|>"}},
         {{"provider", "mineru"}, {"type_map", {{"equation", "formula"}}}}, 200, 100);
     expect(mineru.size() == 1 && mineru[0].bbox[0] == 2 && mineru[0].rotation == 90 && mineru[0].type == "formula", "MinerU parsing");
+    auto wide = parse_layout({{"text", "<|box_start|>0 0 1000 1000<|box_end|><|ref_start|>text<|ref_end|>"}},
+        {{"provider", "mineru"}}, 3000000, 1);
+    expect(wide.size() == 1 && wide[0].bbox[2] == 3000000 && wide[0].bbox[3] == 1,
+           "MinerU wide-image coordinates must not overflow");
     throws([&] { parse_layout({{"text", "wrong model"}}, {{"provider", "mineru"}}, 20, 10); });
     auto bad = c["models"]["layout"]["response"];
     bad["boxes"][0]["bbox"] = {1, 1, 0, 0};
@@ -123,6 +127,11 @@ void pipeline_test() {
     c["execution"]["on_error"] = "fail";
     throws([&] { Pipeline(c).run(temp.path / "input.png", temp.path / "fail"); });
     c["models"]["shared"]["instances"] = 0; throws([&] { validate_config(c); });
+    c["models"]["shared"]["instances"] = 4294967297ULL; throws([&] { validate_config(c); });
+    c["models"]["shared"]["instances"] = 1.8; throws([&] { validate_config(c); });
+    c["models"]["shared"]["instances"] = 2;
+    c["execution"]["workers"] = 1.5; throws([&] { validate_config(c); });
+    c["execution"]["workers"] = 4294967297ULL; throws([&] { validate_config(c); });
 }
 void fallback_test() {
     TempDir temp;
@@ -151,6 +160,33 @@ void fallback_test() {
     c["routes"]["title"]["model"] = "shared";
     throws([&] { validate_config(c); });
 }
+void table_fallback_test() {
+    TempDir temp;
+    const auto bytes = image().png();
+    { std::ofstream out(temp.path / "table.png", std::ios::binary);
+      out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size())); }
+    auto c = config();
+    c["models"]["layout"]["response"] = {{"boxes", Json::array({
+        {{"type", "table"}, {"bbox", {0, 0, 1, 1}}}
+    })}};
+    c["models"]["invalid_table"] = {{"backend", "mock"},
+        {"response", {{"text", "<fcel>A<nl><xcel><nl>"}}}};
+    c["models"]["valid_table"] = {{"backend", "mock"},
+        {"response", {{"text", "| item | value |\\n|---|---|\\n| a | b |"}}}};
+    c["routes"] = {{"table", {{"models", {"invalid_table", "valid_table"}}}}};
+    auto doc = Pipeline(c).run(temp.path / "table.png", temp.path / "recovered");
+    auto& region = doc.pages.at(0).regions.at(0);
+    expect(region.model == "valid_table" && region.text.find("| a | b |") != std::string::npos &&
+        region.raw_text == region.text && region.error.empty(), "F1 table decoder fallback");
+    c["routes"]["table"]["models"] = {"invalid_table"};
+    c["execution"]["on_error"] = "record";
+    doc = Pipeline(c).run(temp.path / "table.png", temp.path / "record");
+    expect(doc.pages.at(0).regions.at(0).error.find("invalid_table") != std::string::npos &&
+        doc.pages.at(0).regions.at(0).model.empty() &&
+        doc.pages.at(0).regions.at(0).text.empty(), "F1 record failure must not commit invalid table");
+    c["execution"]["on_error"] = "fail";
+    throws([&] { Pipeline(c).run(temp.path / "table.png", temp.path / "fail"); });
+}
 void image_process_test() {
     Image i{2, 1, {255,0,0, 0,0,255}};
     auto clipped = i.crop({-1e300, 0, 1e300, 1});
@@ -160,6 +196,11 @@ void image_process_test() {
     throws([&] { i.crop({2, 0, 1, 1}); });
     throws([&] { i.crop({3, 0, 4, 1}); });
     throws([&] { Image{2, 1, {255}}.crop({0, 0, 1, 1}); });
+    Image malformed{2, 1, {255}};
+    throws([&] { malformed.resize(2, 1); });
+    throws([&] { malformed.rotate(90); });
+    throws([&] { malformed.rotate(0); });
+    throws([&] { malformed.png(); });
     auto rotated = i.rotate(90);
     expect(rotated.width == 1 && rotated.height == 2 && rotated.rgb[2] == 255, "CCW rotation");
     expect(base64({0, 1, 2, 3}) == "AAECAw==", "base64 padding");
@@ -171,7 +212,7 @@ void image_process_test() {
 }
 int main() {
     try {
-        layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); image_process_test();
+        layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
