@@ -6,10 +6,15 @@
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--list-formats") {
+            std::cout << omniocr::Json(omniocr::supported_input_extensions()).dump(2) << '\n';
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "omniocr --config CONFIG --input FILE --output EMPTY_DIR [--format both|json|markdown]\n"
                          "omniocr --config CONFIG --batch JOBS.json [--format both|json|markdown]\n"
-                         "omniocr --config CONFIG --validate\n"; return 0;
+                         "omniocr --config CONFIG --validate\n"
+                         "omniocr --list-formats\n"; return 0;
         }
         std::map<std::string, std::string> args;
         bool validate = false;

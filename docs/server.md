@@ -72,3 +72,9 @@ curl -H "Authorization: Bearer $OCR_API_KEY" \
 本版单进程的任务状态仅在内存中，原始文件与成功输出保留在 data-dir 中；服务重启不会自动恢复旧任务，`max-jobs` 是进程生命周期内累计接受的任务上限。尚不支持删除/取消、运行中更改优先级、持久化队列、跨节点/多租户调度或幂等键。模型初始化在服务启动时进行。
 
 ARM64 离线包在启用服务端构建的工作流通过后包含 `server.sh`，但不包含 CANN、NPU 驱动、模型权重或 vLLM 服务。310P3 + DocLayout + OvisOCR2 的服务器实机并发、长稳尚未验收，原先的 [ACL 退出 SIGSEGV Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 也仍未关闭。
+
+## 输入格式
+
+路径提交与二进制上传共用 [输入格式注册表](input-formats.md)，支持 PDF、扫描/拍摄图片（含多页 TIFF）、DOC/DOCX、PPT/PPTX、XLS/XLSX、RTF、ODT/ODS/ODP、EPUB、OFD、HTML/HTM、CSV。扩展名大小写不敏感。
+
+`POST /v1/jobs/upload?extension=.csv` 仍接收原始文件二进制；不改变现有任务、优先级与结果 API。HTTP 202 表示入队，不代表转换成功；缺失 Calibre/OFD 工具或无效文件会通过任务的 failed/error 返回。上传 HTML 不能携带邻接资源目录，应使用自包含 HTML；路径提交可解析文件旁的相对图片。服务进程需有对应转换器和字体。

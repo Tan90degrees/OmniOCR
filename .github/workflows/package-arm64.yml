@@ -17,7 +17,7 @@ jobs:
       - name: Install build and document dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab
+          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab
       - name: Build native ARM64 executable
         run: |
           test "$(uname -m)" = aarch64

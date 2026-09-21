@@ -72,7 +72,7 @@ def ready(base, process):
 
 
 def finished(base, identifier):
-    for _ in range(300):
+    for _ in range(2400):
         code, status = request(base, f"/v1/jobs/{identifier}")
         assert code == 200, status
         if status["status"] in ("failed", "succeeded"):
@@ -81,7 +81,7 @@ def finished(base, identifier):
     raise AssertionError("job did not complete")
 
 
-def run(binary):
+def run(binary, formats=False):
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder)
         permitted = root / "allowed"
@@ -149,6 +149,19 @@ def run(binary):
                 assert all(p["blocks"][0]["text"] == "REST OCR" for p in result["pages"])
                 code, md = request(base, f"/v1/jobs/{identifier}/result?format=markdown")
                 assert code == 200 and md.count(b"<!-- page:") == expected
+            if formats:
+                payloads = {
+                    '.CSV': b'ID,Value\n00123,hello\n',
+                    '.rtf': br'{\rtf1\ansi REST FORMAT FIXTURE}',
+                    '.html': b'<html><body><h1>REST HTML</h1></body></html>',
+                }
+                for ext, data in payloads.items():
+                    code, body = request(base, '/v1/jobs/upload?extension='+ext, method='POST', data=data)
+                    assert code == 202, (ext, code, body)
+                    status = finished(base, body['id'])
+                    assert status['status'] == 'succeeded', (ext, status)
+                    code, result = request(base, f"/v1/jobs/{body['id']}/result")
+                    assert code == 200 and result['pages'], (ext, result)
             assert request(base, "/v1/jobs/deadbeef")[0] == 404
             assert request(base, f"/v1/jobs/{file_id}/result?format=bad")[0] == 400
             assert request(base, "/v1/jobs", method="POST",
@@ -179,4 +192,4 @@ def run(binary):
 
 
 if __name__ == "__main__":
-    run(str(Path(sys.argv[1]).resolve()))
+    run(str(Path(sys.argv[1]).resolve()), "--formats" in sys.argv[2:])

@@ -63,11 +63,7 @@ int number(const Json& item, const char* key, int fallback, int lower, int upper
 std::string extension(const std::string& input) {
     std::string ext = input;
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-    const static std::vector<std::string> supported = {
-        ".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".pgm", ".tga",
-        ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".ods", ".odp"
-    };
-    if (std::find(supported.begin(), supported.end(), ext) == supported.end())
+    if (!supports_input_extension(ext))
         throw std::runtime_error("unsupported upload extension");
     return ext;
 }

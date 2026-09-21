@@ -110,6 +110,18 @@ void validate_config(const Json& c) {
     positive(doc, "max_pages", 1000, 100000);
     positive(doc, "timeout_seconds", 120, 3600);
     positive(doc, "max_pixels", 40000000, 200000000);
+    positive(doc, "max_csv_bytes", 16777216, 268435456);
+    const auto delimiter = doc.value("csv_delimiter", std::string(","));
+    require(delimiter == "," || delimiter == ";" || delimiter == "\t" || delimiter == "|",
+            "csv_delimiter must be comma, semicolon, tab or pipe");
+    for (const auto* key : {"soffice", "pdfinfo", "pdftoppm", "ebook_convert", "ofd_converter"}) {
+        if (doc.contains(key)) {
+            require(doc.at(key).is_string(), std::string(key) + " must be an executable path");
+            const auto executable = doc.at(key).get<std::string>();
+            require(!executable.empty() && executable.find('\0') == std::string::npos,
+                    std::string(key) + " must be a nonempty executable path without NUL");
+        }
+    }
 }
 Json load_config(const fs::path& path) {
     std::ifstream in(path);

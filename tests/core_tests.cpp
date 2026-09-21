@@ -266,9 +266,37 @@ void image_process_test() {
     throws([&] { run_process({"/bin/sleep", "10"}, 1); });
     expect(std::chrono::steady_clock::now() - begin < std::chrono::seconds(3), "subprocess timeout/reap");
 }
+void input_format_test() {
+    for (const auto* ext : {".PDF", ".TIFF", ".rtf", ".odt", ".ods", ".odp", ".epub", ".ofd", ".html", ".htm", ".csv"})
+        expect(supports_input_extension(ext), "missing input extension");
+    expect(!supports_input_extension(".exe") && !supports_input_extension("../csv"), "invalid extension accepted");
+    TempDir temp;
+    const auto input = temp.path / "cells.csv", output = temp.path / "cells.html";
+    auto render = [&](const std::string& content, Json settings = Json::object()) {
+        { std::ofstream f(input, std::ios::binary); f << content; }
+        csv_to_html(input, output, settings);
+        std::ifstream f(output); return std::string(std::istreambuf_iterator<char>(f), {});
+    };
+    auto html = render("\xef\xbb\xbfID,Value,Note\r\n00123,=1+2,\"a,b\n\"\"quoted\"\" <&>\"\r\n");
+    expect(html.find("00123</td>") != std::string::npos && html.find("=1+2</td>") != std::string::npos, "CSV literal values");
+    expect(html.find("a,b<br>&quot;quoted&quot; &lt;&amp;&gt;") != std::string::npos, "CSV quotes/newlines/HTML escape");
+    expect(render("a;b;", {{"csv_delimiter", ";"}}).find("a</td><td>b</td><td></td>") != std::string::npos, "CSV trailing empty field");
+    throws([&] { render("a,\"unterminated"); });
+    throws([&] { render("\"a\"x,b"); });
+    throws([&] { render("a\"b,c"); });
+    throws([&] { render("a,b", {{"max_csv_bytes", 2}}); });
+    throws([&] { render(std::string(1, char(0xff))); });
+    throws([&] { render(""); });
+    auto c = config(); c["document"]["csv_delimiter"] = "::";
+    throws([&] { validate_config(c); });
+    c["document"] = {{"max_csv_bytes", 1.5}};
+    throws([&] { validate_config(c); });
+    c["document"] = {{"ofd_converter", ""}};
+    throws([&] { validate_config(c); });
+}
 int main() {
     try {
-        layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
+        input_format_test(); layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

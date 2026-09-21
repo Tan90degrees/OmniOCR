@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+jar="${OMNIOCR_OFD_JAR:-$here/ofd-converter/target/omniocr-ofd-converter.jar}"
+if [[ ! -f "$jar" ]]; then
+  echo 'OFD converter JAR missing; build tools/ofd-converter with mvn package or set OMNIOCR_OFD_JAR' >&2
+  exit 1
+fi
+exec java -Xmx512m -Djava.awt.headless=true -jar "$jar" "$@"

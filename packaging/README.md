@@ -35,3 +35,7 @@ export OCR_API_KEY='replace-with-a-strong-secret'
 ```
 
 当前 ARM64 发布工作流的 REST 二进制与 CLI 一样关闭 ACL/ONNX，适用于 HTTP/vLLM 模型；启用 ACL 的 310P3 实机服务仍需使用与目标 CANN 匹配的 ARM64 SDK 在目标环境编译和验证，不能把普通 ARM64 出包作为 NPU 实测证明。
+
+## 新增输入格式依赖
+
+包内原生 libtiff 支持多页 TIF/TIFF；RTF、ODT/ODS/ODP、HTML/HTM、CSV 复用 LibreOffice。EPUB 需要匹配目标 ARM64 系统的 Calibre，OFD 需要 JRE 和 `tools/ofd-converter` 构建的 JAR；当前离线包不自动包含 Calibre/JRE/JAR，部署前需单独准备并通过 document.ebook_convert/ofd_converter 指定。不能把格式列表视为外部依赖已经安装。完整安装和验证步骤见 docs/input-formats.md。

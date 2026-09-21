@@ -73,3 +73,6 @@ models/
 out/
 __pycache__/
 *.pyc
+
+# Optional Java OFD converter build
+tools/ofd-converter/target/

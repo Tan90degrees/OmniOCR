@@ -77,6 +77,10 @@ public:
     TempDir& operator=(const TempDir&) = delete;
     fs::path path;
 };
+const std::vector<std::string>& supported_input_extensions();
+bool supports_input_extension(std::string extension);
+void csv_to_html(const fs::path& input, const fs::path& output, const Json& settings);
+void read_tiff(const fs::path&, const Json&, const std::function<void(int, const Image&)>&);
 void read_document(const fs::path&, const Json& settings,
                    const std::function<void(int, const Image&)>& consume);
 

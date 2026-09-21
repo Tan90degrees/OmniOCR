@@ -27,9 +27,12 @@ flowchart TD
 
 | 模块 | 当前实现 | 部署条件 / 边界 |
 |---|---|---|
-| 图片 | PNG、JPEG、BMP、PPM/PGM、TGA；RGB、透明背景合成 | 暂不含 TIFF/WebP、多帧图片 |
+| 扫描/拍摄图片 | PNG、JPEG、BMP、PPM/PGM、TGA、TIFF/TIF；RGB、透明背景合成 | TIFF 支持多页（libtiff）；暂不含 WebP/HEIC |
 | PDF | Poppler 按页渲染、数字页序、页数和像素上限 | 需要 `pdfinfo`、`pdftoppm` |
-| Word/PPT/Excel | DOC/DOCX、PPT/PPTX、XLS/XLSX → PDF | LibreOffice；沿用打印分页，不读取 Excel 公式语义或隐藏工作表 |
+| Word/PPT/Excel、RTF、ODF | DOC/DOCX、PPT/PPTX、XLS/XLSX、RTF、ODT/ODS/ODP → PDF | LibreOffice；沿用打印分页，不读取 Excel 公式语义或隐藏工作表 |
+| HTML/HTM、CSV | HTML 静态页面；CSV 字面文本表格 → PDF | LibreOffice；CSV 为 UTF-8，可配置分隔符，不执行公式 |
+| EPUB | Calibre 转 PDF 后逐页 OCR | 需要 `ebook-convert`，按渲染分页 |
+| OFD | OFDRW/PDFBox 转 PDF 后逐页 OCR | 提供 Java 转换工具；需要 JRE 和构建后的 JAR |
 | PaddleLayout | Paddle JSON 适配器；本地 `[N,6]` 检测输出解码 | 本地导出需匹配模型输入、类别表、坐标约定；V2 的阅读顺序网络不能用单个检测输出替代 |
 | MinerU2.5-Pro | vLLM 版面 token、0–1000 坐标、旋转、分块识别 | 示例针对官方 MinerU 版面协议，需匹配实际权重和服务版本 |
 | vLLM | OpenAI 兼容多模态 Chat Completions | 完整 endpoint、模型名、按 BOX 配置 prompt；不在客户端启动 vLLM |
@@ -38,12 +41,14 @@ flowchart TD
 | 并发 | 固定数量 BOX 工作线程、共享实例池、获取实例超时 | 每次 `run()` 逐页处理，最多保留一页图像及有限个裁剪；文本结果保存在内存 |
 | 输出 | Markdown、JSON、图片裁剪、OTSL→HTML 合并表格 | 保留原始表格文本；不做跨页表格/段落合并 |
 
+完整格式、依赖与配置见 [输入格式说明](docs/input-formats.md)。`omniocr --list-formats` 列出可路由的扩展名；转换器是否已安装须按部署环境确认。
+
 ## 构建
 
 Linux x86_64 / aarch64，GCC 支持 C++17，CMake ≥ 3.20。
 
 ```bash
-sudo apt-get install -y g++ cmake libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice
+sudo apt-get install -y g++ cmake libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j4
 ctest --test-dir build --output-on-failure

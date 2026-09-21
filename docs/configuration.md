@@ -13,6 +13,10 @@
 | `document.max_pages` | 1000 | 超过则整份拒绝，不静默截断 |
 | `document.timeout_seconds` | 120 | 每次转换/渲染命令的超时 |
 | `document.soffice/pdfinfo/pdftoppm` | 对应命令名 | 可指定可执行文件绝对路径 |
+| `document.ebook_convert` | `ebook-convert` | EPUB → PDF，可执行文件路径（不是 shell 命令） |
+| `document.ofd_converter` | `omniocr-ofd-to-pdf` | OFD → PDF，见 [输入格式](input-formats.md) |
+| `document.csv_delimiter` | `,` | CSV 分隔符：逗号、分号、tab 或竖线 |
+| `document.max_csv_bytes` | 16777216 | CSV 解析前的输入字节上限 |
 | `layout.provider` | 必填 | `paddle`、`mineru`、`normalized` |
 | `layout.model` | 必填 | 模型池 ID |
 | `layout.type_map` | 空 | 原始 label → 业务 BOX 类型 |
