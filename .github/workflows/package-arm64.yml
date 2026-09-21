@@ -17,12 +17,12 @@ jobs:
       - name: Install build and document dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core
+          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab
       - name: Build native ARM64 executable
         run: |
           test "$(uname -m)" = aarch64
           bash -n packaging/make-arm64.sh packaging/run-arm64.sh packaging/verify-arm64.sh
-          cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release -DOMNIOCR_WITH_ACL=OFF -DOMNIOCR_WITH_ONNX=OFF
+          cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release -DOMNIOCR_WITH_ACL=OFF -DOMNIOCR_WITH_ONNX=OFF -DOMNIOCR_WITH_SERVER=ON
           cmake --build build-arm64 -j2
           ctest --test-dir build-arm64 --output-on-failure
       - name: Assemble offline archive and smoke test
@@ -33,6 +33,7 @@ jobs:
           name="omniocr-${version}-linux-arm64-offline"
           bash packaging/make-arm64.sh build-arm64 "$RUNNER_TEMP/$name"
           (cd "$RUNNER_TEMP/$name" && ./verify.sh)
+          python3 tests/server_integration.py "$RUNNER_TEMP/$name/server.sh"
           python3 - <<'PY'
           from pathlib import Path
           import os
