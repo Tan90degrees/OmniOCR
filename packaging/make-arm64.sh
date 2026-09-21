@@ -7,6 +7,9 @@ stage="${1:?usage: bash packaging/make-arm64.sh BUILD_DIR OUTPUT_DIR}"
 dest="${2:?missing output directory}"
 mkdir -p "$dest/bin" "$dest/lib" "$dest/share" "$dest/configs" "$dest/docs"
 cp -a "$stage/omniocr" "$dest/bin/"
+if [[ -x "$stage/omniocr-server" ]]; then
+  cp -a "$stage/omniocr-server" "$dest/bin/"
+fi
 cp -a "$root/configs/." "$dest/configs/"
 cp -a "$root/docs/." "$dest/docs/"
 cp -a "$root/README.md" "$dest/"
@@ -53,7 +56,11 @@ for directory in /usr/lib/aarch64-linux-gnu/gio/modules /usr/lib/aarch64-linux-g
   fi
 done
 cp "$root/packaging/run-arm64.sh" "$dest/run.sh"
+if [[ -x "$stage/omniocr-server" ]]; then
+  cp "$root/packaging/run-arm64.sh" "$dest/server.sh"
+fi
 cp "$root/packaging/verify-arm64.sh" "$dest/verify.sh"
 chmod +x "$dest/run.sh" "$dest/verify.sh"
+[[ ! -f "$dest/server.sh" ]] || chmod +x "$dest/server.sh"
 # Avoid including private local files by generating the checksum manifest in staging.
 (cd "$dest" && find bin lib configs docs rootfs -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
