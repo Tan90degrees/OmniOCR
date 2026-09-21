@@ -104,6 +104,7 @@ public:
     std::vector<BatchResult> run_batch(const std::vector<BatchJob>& jobs,
                                        BatchOptions options = {});
 private:
+    friend class ServerScheduler;  // Persistent REST dispatcher shares the bounded model registry.
     Page process_page(int number, const Image& image, const fs::path& output_dir, int box_workers);
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
