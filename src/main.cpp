@@ -8,6 +8,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "omniocr --config CONFIG --input FILE --output EMPTY_DIR [--format both|json|markdown]\n"
+                         "omniocr --config CONFIG --batch JOBS.json [--format both|json|markdown]\n"
                          "omniocr --config CONFIG --validate\n"; return 0;
         }
         std::map<std::string, std::string> args;
@@ -74,13 +75,13 @@ int main(int argc, char** argv) {
             bool fatal = false, partial = false;
             for (size_t i = 0; i < results.size(); ++i) {
                 if (!results[i].error.empty()) {
-                    std::cerr << "Failed " << jobs[i].input << ": " << results[i].error << '\\n';
+                    std::cerr << "Failed " << jobs[i].input << ": " << results[i].error << '\n';
                     fatal = true; continue;
                 }
                 try {
                     omniocr::write_outputs(results[i].document, jobs[i].output_dir, format);
                 } catch (const std::exception& e) {
-                    std::cerr << "Failed output " << jobs[i].input << ": " << e.what() << '\\n';
+                    std::cerr << "Failed output " << jobs[i].input << ": " << e.what() << '\n';
                     fatal = true; continue;
                 }
                 size_t errors = 0;
@@ -89,7 +90,7 @@ int main(int argc, char** argv) {
                         if (!block.error.empty()) ++errors;
                 partial |= errors != 0;
                 std::cout << "Processed " << jobs[i].input << ": " << results[i].document.pages.size()
-                          << " pages, " << errors << " failed blocks\\n";
+                          << " pages, " << errors << " failed blocks\n";
             }
             return fatal ? 1 : partial ? 2 : 0;
         }
