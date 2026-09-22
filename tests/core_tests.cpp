@@ -73,6 +73,23 @@ void v3_plugin_test() {
     expect(crop.width==10 && crop.height==9 &&
            crop.rgb[(size_t(8)*crop.width)*3]==255 && crop.rgb[(size_t(2)*crop.width+5)*3]==40,
            "V3 polygon masking must preserve inside pixels");
+    const Json mapping={{"coordinates","model_input"},{"image_size",{10,5}},
+        {"transform",{{"matrix",{2,0,-4, 0,2,-6, 0,0,1}}}}};
+    const auto context=make_transform_context(mapping,20,10);
+    expect(context.to_page(2,3)==std::array<double,2>{0.,0.} &&
+           context.to_page(7,4)==std::array<double,2>{10.,2.},
+           "request-scoped scale/padding inverse transform");
+    const Json model_space={{"provider","paddle.doclayout_v3.http"},
+        {"coordinates","model_input"},{"image_size",{10,5}},
+        {"transform",{{"matrix",{2,0,-4, 0,2,-6, 0,0,1}}}}};
+    auto transformed=parse_layout(Json::parse(R"({"boxes":[{
+        "label":"text","coordinate":[2,3,7,4],"order":0,
+        "polygon_points":[[2,3],[7,3],[7,4],[2,4]]} ]})"),model_space,20,10);
+    expect(transformed.size()==1 && transformed[0].bbox==std::array<double,4>{0.,0.,10.,2.} &&
+           transformed[0].polygon[2]==std::array<double,2>{10.,2.},
+           "V3 transform maps all geometry to original page");
+    throws([&] { make_transform_context({{"coordinates","model_input"},{"image_size",{10,5}},
+        {"transform",{{"matrix",{0,0,0,0,0,0,0,0,0}}}}},20,10).to_page(1,1); });
     throws([&] { crop_region(img,boxes[0],{{"cropper","polygon_mask_crop"}}); });
     auto fallback=crop_region(img,boxes[0],{{"cropper","polygon_mask_crop"},{"crop_fallback","bbox_crop"}});
     expect(fallback.width==3, "explicit mask fallback");
