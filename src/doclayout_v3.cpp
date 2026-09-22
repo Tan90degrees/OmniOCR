@@ -41,16 +41,7 @@ std::vector<Box> parse_doclayout_v3(const Json& response, const Json& layout, in
     if (root->contains("res")) root=&root->at("res");
     const auto& items=root->at("boxes");
     if (!items.is_array()) throw std::runtime_error("V3 boxes must be an array");
-    const std::string coordinates=layout.value("coordinates",std::string("pixel"));
-    const bool normalized=coordinates=="normalized";
-    const bool input_coords=coordinates=="model_input";
-    double sx=1., sy=1.;
-    if (normalized) { sx=width; sy=height; }
-    if (input_coords) {
-        const auto& dims=layout.at("image_size");
-        sx=double(width)/dims.at(0).get<int>();
-        sy=double(height)/dims.at(1).get<int>();
-    }
+    const auto transform=make_transform_context(layout,width,height);
     const auto aliases=layout.value("type_map",Json::object());
     const double threshold=layout.value("score_threshold",0.0);
     const size_t max_boxes=layout.value("max_boxes",size_t(2000));
@@ -75,19 +66,23 @@ std::vector<Box> parse_doclayout_v3(const Json& response, const Json& layout, in
         b.order=b.reading_order.value_or(int(index));
         if (item.contains("polygon_points") && !item.at("polygon_points").is_null()) {
             b.polygon=polygon(item.at("polygon_points"));
-            for (auto& point : b.polygon) {
-                point[0]=std::clamp(point[0]*sx,0.,double(width));
-                point[1]=std::clamp(point[1]*sy,0.,double(height));
-            }
+            for (auto& point : b.polygon) point=transform.to_page(point[0],point[1]);
             if (std::abs(signed_area(b.polygon))<1e-6)
                 throw std::runtime_error("degenerate V3 polygon");
         }
         if (item.contains("coordinate") && !item.at("coordinate").is_null()) {
             const auto& coordinate=item.at("coordinate");
             if (!coordinate.is_array() || coordinate.size()!=4) throw std::runtime_error("invalid V3 bbox");
-            for (int i=0;i<4;++i) {
-                const double v=numeric(coordinate[i])*(i%2?sy:sx);
-                b.bbox[i]=std::clamp(v,0.,double(i%2?height:width));
+            const double x0=numeric(coordinate[0]), y0=numeric(coordinate[1]);
+            const double x1=numeric(coordinate[2]), y1=numeric(coordinate[3]);
+            if (x1<=x0 || y1<=y0) throw std::runtime_error("empty V3 model-space bbox");
+            b.bbox={double(width),double(height),0.,0.};
+            for (const auto& point : {std::array<double,2>{x0,y0}, {x1,y0}, {x1,y1}, {x0,y1}}) {
+                const auto mapped=transform.to_page(point[0],point[1]);
+                b.bbox[0]=std::min(b.bbox[0],mapped[0]);
+                b.bbox[1]=std::min(b.bbox[1],mapped[1]);
+                b.bbox[2]=std::max(b.bbox[2],mapped[0]);
+                b.bbox[3]=std::max(b.bbox[3],mapped[1]);
             }
         } else if (!b.polygon.empty()) {
             b.bbox={double(width),double(height),0.,0.};
