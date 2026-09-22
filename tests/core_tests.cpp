@@ -91,6 +91,41 @@ void v3_plugin_test() {
     legacy.pages.push_back(legacy_page);
     expect(document_json(legacy)["schema_version"]==1,"legacy output schema remains v1");
 }
+void v2_config_test() {
+    Json c={{"version",2},
+        {"executors",{
+            {"layout_pool",{{"backend","mock"},{"response",{{"boxes",Json::array({
+                {{"type","text"},{"bbox",{0,0,1,1}}}
+            })}}}}},
+            {"ocr_pool",{{"backend","mock"},{"max_inflight",1},
+                         {"response",{{"text","v2 recognition"}}}}}
+        }},
+        {"models",{
+            {"page_layout",{{"adapter","normalized"},{"executor","layout_pool"}}},
+            {"text_model",{{"adapter","vlm.ovisocr2"},{"executor","ocr_pool"}}},
+            {"title_model",{{"adapter","vlm.ovisocr2"},{"executor","ocr_pool"}}}
+        }},
+        {"pipeline",{{"layout",{{"model","page_layout"},{"coordinates","normalized"}}},
+                     {"routes",{{"text",{{"model","text_model"},{"cropper","bbox_crop"}}}}}}}};
+    auto runtime=normalize_config(c);
+    expect(runtime["version"]==1 && runtime["models"].size()==2 &&
+           runtime["layout"]["model"]=="layout_pool" &&
+           runtime["routes"]["text"]["model"]=="ocr_pool" &&
+           runtime["routes"]["text"]["adapter"]=="vlm.ovisocr2",
+           "v2 executor sharing and adapter binding");
+    validate_config(c);
+    TempDir temp;
+    const auto bytes=image().png();
+    { std::ofstream out(temp.path/"v2.png",std::ios::binary);
+      out.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size())); }
+    const auto doc=Pipeline(c).run(temp.path/"v2.png",temp.path/"out");
+    expect(doc.pages.size()==1 && doc.pages[0].regions.size()==1 &&
+           doc.pages[0].regions[0].model=="text_model" &&
+           doc.pages[0].regions[0].text=="v2 recognition",
+           "v2 bound model uses shared executor while recording binding ID");
+    c["models"]["text_model"]["executor"]="missing";
+    throws([&] { normalize_config(c); });
+}
 void pool_test() {
     struct State { std::atomic<int> active{0}, peak{0}, constructed{0}; } state;
     struct Probe : Model {
@@ -339,7 +374,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
