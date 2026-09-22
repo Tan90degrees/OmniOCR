@@ -4,7 +4,7 @@
 
 OmniOCR 将文档转成页面图像，使用 PaddleLayout 或 MinerU2.5-Pro 协议进行版面分析，再把正文、标题、表格、公式等区域（BOX）分配给配置的模型。可以混合使用远程 vLLM/HTTP 服务、本地 Ascend ACL/OM 和 ONNX Runtime，并在不同区域类型之间共享模型实例。
 
-[快速上手](docs/getting-started.md) · [文档目录](docs/README.md) · [配置参考](docs/configuration.md) · [REST API](docs/server.md) · [昇腾部署](docs/ascend.md)
+[快速上手](docs/getting-started.md) · [文档目录](docs/README.md) · [配置参考](docs/configuration.md) · [插件与 V3](docs/plugins.md) · [REST API](docs/server.md) · [昇腾部署](docs/ascend.md)
 
 ## 可以做什么
 
@@ -112,6 +112,7 @@ ctest --test-dir build --output-on-failure
 | [快速上手](docs/getting-started.md) | 构建、离线依赖、首个任务、CLI 与 REST 演示 |
 | [输入格式](docs/input-formats.md) | 全部文件类型、转换器安装与内容边界 |
 | [配置与模型适配](docs/configuration.md) | 模型池、BOX 路由、fallback、后端协议、JSON 结果 |
+| [插件与 PP-DocLayoutV3](docs/plugins.md) | v2 配置、轮廓裁剪、C ABI 插件与能力边界 |
 | [REST API](docs/server.md) | 启动、上传、路径提交、状态/结果、容量限制 |
 | [批处理](docs/batch.md) | 任务清单、优先级、并发参数和退出码 |
 | [架构与 C++ 集成](docs/architecture.md) | 模块边界、调度、资源生命周期、扩展接口 |
