@@ -93,8 +93,15 @@ void validate_config(const Json& c) {
             if (route.contains("crop_fallback"))
                 require(cropper == "polygon_mask_crop" &&
                         route.at("crop_fallback") == "bbox_crop", "invalid crop_fallback");
-            if (route.contains("mask_background"))
-                positive(route, "mask_background", 255, 255);
+            if (route.contains("mask_background")) {
+                const auto& color = route.at("mask_background");
+                require(color.is_number_integer() || color.is_number_unsigned(),
+                        "mask_background must be an integer");
+                if (color.is_number_unsigned())
+                    require(color.get<uint64_t>() <= 255, "mask_background out of range");
+                else require(color.get<int64_t>() >= 0 && color.get<int64_t>() <= 255,
+                             "mask_background out of range");
+            }
         }
         if (route.contains("adapter"))
             require(has_recognition_adapter(route.at("adapter").get<std::string>()),
