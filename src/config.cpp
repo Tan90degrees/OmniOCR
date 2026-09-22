@@ -29,6 +29,10 @@ void positive(const Json& j, const char* key, int fallback, int max) {
 }
 }
 void validate_config(const Json& c) {
+    if (c.is_object() && c.contains("version") && c.at("version") == 2) {
+        validate_config(normalize_config(c));
+        return;
+    }
     load_plugins(c);
     require(c.contains("version") && c.at("version").is_number_integer() &&
             c.at("version").get<int64_t>() == 1, "version must be 1");
@@ -156,6 +160,7 @@ Json load_config(const fs::path& path) {
         if (plugin.contains("library")) plugin["library"] =
             fs::absolute(path.parent_path() / plugin["library"].get<std::string>()).string();
     }
+    c = normalize_config(c);
     validate_config(c);
     // Model assets are resolved relative to the config, never the process cwd.
     for (auto& m : c["models"]) {
