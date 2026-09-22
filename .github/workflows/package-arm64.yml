@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/ascend-ocr-framework
+      - feat/model-plugin-layout-v3
     tags:
       - 'v*'
 permissions:
@@ -17,7 +18,7 @@ jobs:
       - name: Install build and document dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab
+          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab python3-pil
       - name: Build native ARM64 executable
         run: |
           test "$(uname -m)" = aarch64
@@ -34,6 +35,8 @@ jobs:
           bash packaging/make-arm64.sh build-arm64 "$RUNNER_TEMP/$name"
           (cd "$RUNNER_TEMP/$name" && ./verify.sh)
           python3 tests/server_integration.py "$RUNNER_TEMP/$name/server.sh"
+          python3 tests/v3_http_integration.py "$RUNNER_TEMP/$name/run.sh"
+          python3 tests/external_plugin_integration.py "$RUNNER_TEMP/$name/run.sh" "$RUNNER_TEMP/$name/server.sh"
           python3 - <<'PY'
           from pathlib import Path
           import os
