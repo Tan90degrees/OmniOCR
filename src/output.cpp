@@ -30,6 +30,7 @@ Json document_json(const Document& doc, int requested_schema) {
                 {"asset",r.asset},{"error",r.error}};
             if (schema_v2) {
                 block["polygon"]=r.box.polygon;
+                block["crop_bbox"]=r.box.crop_bbox ? Json(*r.box.crop_bbox) : Json(r.box.bbox);
                 block["reading_order"]=r.box.reading_order ? Json(*r.box.reading_order):Json(nullptr);
                 block["source_index"]=r.box.source_index;
                 block["provenance"]=r.box.provenance;
