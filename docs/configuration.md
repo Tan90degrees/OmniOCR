@@ -1,5 +1,7 @@
 # 配置与模型适配
 
+[项目首页](../README.md) · [文档目录](README.md)
+
 配置采用 JSON，`version` 为 1。模型路径、字典路径相对于配置文件；输入和输出路径相对于调用者工作目录。
 
 ## 顶层配置
@@ -71,6 +73,18 @@ Paddle 布局返回：
 
 自定义服务也可返回 `normalized` 布局：`{"boxes":[{"type":"text","bbox":[...],"order":0}]}`。识别服务返回 `{"text":"..."}`。
 
+### 启动 Paddle 桥接服务
+
+在仓库根目录启动桥接服务，再在另一个终端运行 CLI：
+
+```bash
+# 先安装适合当前设备的 PaddlePaddle，再安装 paddleocr、Pillow、numpy
+python tools/paddle_layout_server.py --model PP-DocLayoutV2 --device cpu --port 8001
+./build/omniocr --config configs/paddle-http-vllm.json --input scan.png --output out/paddle
+```
+
+桥接程序只承载 Paddle 模型，主流水线、调度、裁剪、本地推理与输出均为 C++。桥接服务默认监听 localhost，串行承载一个模型实例；真实 Paddle 权重未在当前开发环境下载验证。
+
 ## OM/ONNX 本地模型
 
 `backend` 为 `acl` 或 `onnx`。输入和输出名称、shape、dtype、前处理、类别表、字典必须从你实际导出的模型确认。框架只内置以下适配，其他模型通过 `Model`/`TensorEngine` 扩展。
@@ -119,3 +133,7 @@ CTC 通常是文字行识别，不能把多行段落 BOX 直接缩成一行就�
 ```
 
 表格的 `raw_text` 保存模型原文，`text` 保存转换后的 HTML（OTSL）或原 Markdown/HTML。异常块保留 BOX 与 error，文档页顺序和模型阅读顺序不随推理完成先后改变。
+
+## 相关文档
+
+[快速上手](getting-started.md) · [输入格式](input-formats.md) · [昇腾部署](ascend.md)
