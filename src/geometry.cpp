@@ -60,9 +60,9 @@ Image polygon_mask_crop(const Image& image, const Box& box, const Json& route) {
     }
     if (box.polygon.size()<3) throw std::runtime_error("invalid polygon");
     const auto& crop_box=box.crop_bbox ? *box.crop_bbox : box.bbox;
+    Image crop=image.crop(crop_box); // validate source and crop geometry first
     const double x0=std::floor(std::clamp(crop_box[0],0.,double(image.width)));
-    const double y0=std::floor(std::clamp(crop_box[1],0.,double(image.height)));
-    Image crop=image.crop(crop_box); // validates source and bounds before masking
+    const double y0=std::floor(std::clamp(crop_box[1],0.,double(image.height))); // validates source and bounds before masking
     // Compute coordinates in original page space; crop origin follows Image::crop floor/clamp.
     const uint8_t background=uint8_t(route.value("mask_background",255));
     for (int y=0;y<crop.height;++y) for (int x=0;x<crop.width;++x) {
