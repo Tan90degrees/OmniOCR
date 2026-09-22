@@ -28,6 +28,7 @@ int main(int argc, char** argv) {
         if (!args.count("--config")) throw std::runtime_error("--config is required (see --help)");
         auto config = omniocr::load_config(args.at("--config"));
         if (validate) { std::cout << "Configuration valid\n"; return 0; }
+        const int schema_version = config.value("output", omniocr::Json::object()).value("schema_version", 0);
         if (!args.count("--batch") && (!args.count("--input") || !args.count("--output"))) throw std::runtime_error("--input and --output are required");
         const auto format = args.count("--format") ? args.at("--format") : "both";
         if (format != "json" && format != "markdown" && format != "both") throw std::runtime_error("invalid --format");
@@ -84,7 +85,7 @@ int main(int argc, char** argv) {
                     fatal = true; continue;
                 }
                 try {
-                    omniocr::write_outputs(results[i].document, jobs[i].output_dir, format);
+                    omniocr::write_outputs(results[i].document, jobs[i].output_dir, format, schema_version);
                 } catch (const std::exception& e) {
                     std::cerr << "Failed output " << jobs[i].input << ": " << e.what() << '\n';
                     fatal = true; continue;
@@ -101,7 +102,7 @@ int main(int argc, char** argv) {
         }
         omniocr::Pipeline pipeline(std::move(config));
         auto document = pipeline.run(args.at("--input"), args.at("--output"));
-        omniocr::write_outputs(document, args.at("--output"), format);
+        omniocr::write_outputs(document, args.at("--output"), format, schema_version);
         size_t errors = 0;
         for (const auto& page : document.pages) for (const auto& region : page.regions) if (!region.error.empty()) ++errors;
         std::cout << "Processed " << document.pages.size() << " pages, " << errors << " failed blocks\n";
