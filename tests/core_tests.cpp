@@ -71,7 +71,7 @@ void v3_plugin_test() {
     Image img{20,10,std::vector<uint8_t>(600,40)};
     auto crop=crop_region(img,boxes[1],{{"cropper","polygon_mask_crop"},{"mask_background",255}});
     expect(crop.width==10 && crop.height==9 &&
-           crop.rgb[0]==255 && crop.rgb[(size_t(2)*crop.width+5)*3]==40,
+           crop.rgb[(size_t(8)*crop.width)*3]==255 && crop.rgb[(size_t(2)*crop.width+5)*3]==40,
            "V3 polygon masking must preserve inside pixels");
     throws([&] { crop_region(img,boxes[0],{{"cropper","polygon_mask_crop"}}); });
     auto fallback=crop_region(img,boxes[0],{{"cropper","polygon_mask_crop"},{"crop_fallback","bbox_crop"}});
