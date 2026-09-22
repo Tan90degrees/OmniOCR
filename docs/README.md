@@ -24,6 +24,7 @@
 | [快速上手](getting-started.md) | 构建选项、依赖路径、CLI/REST 首次运行 |
 | [输入格式](input-formats.md) | 后缀、转换器安装、编码与分页语义 |
 | [配置与模型适配](configuration.md) | 字段默认值、模型池、路由、fallback、后端协议、结果结构 |
+| [插件与 PP-DocLayoutV3](plugins.md) | v2 执行池绑定、几何、第三方 .so 与接口边界 |
 | [REST 服务](server.md) | HTTP 接口、任务状态、部署参数与运行限制 |
 | [批处理](batch.md) | jobs 清单、优先级与批次错误处理 |
 | [架构与资源生命周期](architecture.md) | 实现边界、线程模型、资源管理、C++ API |
