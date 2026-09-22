@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,7 +26,12 @@ struct Box {
     std::string type, raw_type;
     std::array<double, 4> bbox{};
     double score = 1;
-    int order = 0, rotation = 0;
+    int order = 0, rotation = 0; // legacy v1 order field
+    std::optional<int> reading_order; // null means excluded from body ordering
+    size_t source_index = 0;
+    std::vector<std::array<double, 2>> polygon; // original rendered page pixel coordinates
+    std::optional<std::array<double, 4>> crop_bbox; // OCR crop may differ from detector bbox
+    Json provenance = Json::object(), extensions = Json::object();
 };
 struct Region {
     Box box;
@@ -61,6 +67,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+Json normalize_config(const Json&);
 Json load_config(const fs::path&);
 void validate_config(const Json&);
 std::vector<Box> parse_layout(const Json& response, const Json& layout, int width, int height);
@@ -113,8 +120,9 @@ private:
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
 };
-Json document_json(const Document&);
+Json document_json(const Document&, int schema_version = 0);
 std::string document_markdown(const Document&);
 std::string table_to_html(const std::string&);
-void write_outputs(const Document&, const fs::path& directory, const std::string& format);
+void write_outputs(const Document&, const fs::path& directory, const std::string& format,
+                   int schema_version = 0);
 } // namespace omniocr

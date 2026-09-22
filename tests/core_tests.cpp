@@ -1,4 +1,5 @@
 #include "omniocr/tensor.hpp"
+#include "omniocr/plugins.hpp"
 #include <algorithm>
 #include <mutex>
 #include <atomic>
@@ -47,6 +48,105 @@ void layout_test() {
     auto paddle = parse_layout({{"res", {{"boxes", Json::array({{{"label", "text"}, {"coordinate", {-2, 0, 25, 8}}, {"score", .9}}})}}}},
         {{"provider", "paddle"}}, 20, 10);
     expect(paddle[0].bbox[0] == 0 && paddle[0].bbox[2] == 20, "box clipping");
+}
+void v3_plugin_test() {
+    const Json settings={{"provider","paddle.doclayout_v3.http"},
+        {"coordinates","pixel"},{"type_map",{{"paragraph_title","heading"}}}};
+    const auto raw=Json::parse(R"({
+        "res":{"boxes":[
+            {"label":"ignored_header","coordinate":[0,0,6,4],"order":null,
+             "polygon_points":[[0,0],[6,0],[6,4],[0,4]],"score":0.8},
+            {"label":"paragraph_title","coordinate":[5,0,15,9],"order":2,
+             "polygon_points":[[5,0],[15,0],[10,9]],"score":0.95},
+            {"label":"text","coordinate":[1,1,4,4],"order":0,"score":0.9}
+        ]}
+    })");
+    auto boxes=parse_layout(raw,settings,20,10);
+    expect(boxes.size()==3 && boxes[0].type=="text" &&
+           boxes[1].type=="heading" && boxes[1].source_index==1 &&
+           boxes[1].polygon.size()==3 && boxes[2].source_index==0 &&
+           !boxes[2].reading_order, "V3 polygon and null order");
+    const auto raw_bad=Json::parse(R"({"boxes":[{"label":"text","polygon_points":[[0,0],[1,1],[2,2]]}]})");
+    throws([&] { parse_layout(raw_bad,settings,20,10); });
+    Image img{20,10,std::vector<uint8_t>(600,40)};
+    auto crop=crop_region(img,boxes[1],{{"cropper","polygon_mask_crop"},{"mask_background",255}});
+    expect(crop.width==10 && crop.height==9 &&
+           crop.rgb[(size_t(8)*crop.width)*3]==255 && crop.rgb[(size_t(2)*crop.width+5)*3]==40,
+           "V3 polygon masking must preserve inside pixels");
+    const Json mapping={{"coordinates","model_input"},{"image_size",{10,5}},
+        {"transform",{{"matrix",{2,0,-4, 0,2,-6, 0,0,1}}}}};
+    const auto context=make_transform_context(mapping,20,10);
+    expect(context.to_page(2,3)==std::array<double,2>{0.,0.} &&
+           context.to_page(7,4)==std::array<double,2>{10.,2.},
+           "request-scoped scale/padding inverse transform");
+    const Json model_space={{"provider","paddle.doclayout_v3.http"},
+        {"coordinates","model_input"},{"image_size",{10,5}},
+        {"transform",{{"matrix",{2,0,-4, 0,2,-6, 0,0,1}}}}};
+    auto transformed=parse_layout(Json::parse(R"({"boxes":[{
+        "label":"text","coordinate":[2,3,7,4],"order":0,
+        "polygon_points":[[2,3],[7,3],[7,4],[2,4]]} ]})"),model_space,20,10);
+    expect(transformed.size()==1 && transformed[0].bbox==std::array<double,4>{0.,0.,10.,2.} &&
+           transformed[0].polygon[2]==std::array<double,2>{10.,2.},
+           "V3 transform maps all geometry to original page");
+    throws([&] { make_transform_context({{"coordinates","model_input"},{"image_size",{10,5}},
+        {"transform",{{"matrix",{0,0,0,0,0,0,0,0,0}}}}},20,10).to_page(1,1); });
+    throws([&] { crop_region(img,boxes[0],{{"cropper","polygon_mask_crop"}}); });
+    auto fallback=crop_region(img,boxes[0],{{"cropper","polygon_mask_crop"},{"crop_fallback","bbox_crop"}});
+    expect(fallback.width==3, "explicit mask fallback");
+    Document document; document.source="fixture";
+    Page page; page.number=1; page.width=20; page.height=10;
+    for (auto& box:boxes) { Region r; r.box=box; r.text=box.type; page.regions.push_back(r); }
+    document.pages.push_back(page);
+    auto output=document_json(document);
+    const auto forced_legacy=document_json(document,1);
+    expect(forced_legacy["schema_version"]==1 &&
+           !forced_legacy["pages"][0]["blocks"][1].contains("polygon") &&
+           forced_legacy["pages"][0]["blocks"][1]["id"]=="p1-b1",
+           "explicit v1 output drops V3 geometry only by caller request");
+    expect(output["schema_version"]==2 && output["pages"][0]["blocks"][1]["polygon"].size()==3 &&
+           output["pages"][0]["blocks"][2]["reading_order"].is_null() &&
+           output["pages"][0]["blocks"][1]["id"]=="p1-s1" &&
+           document_markdown(document).find("ignored_header")==std::string::npos,
+           "V3 output schema, stable source identity, nullable Markdown order");
+    Document legacy; Page legacy_page; legacy_page.number=1;
+    Box legacy_box; legacy_box.reading_order=0; legacy_page.regions.push_back({legacy_box});
+    legacy.pages.push_back(legacy_page);
+    expect(document_json(legacy)["schema_version"]==1,"legacy output schema remains v1");
+}
+void v2_config_test() {
+    Json c={{"version",2},
+        {"executors",{
+            {"layout_pool",{{"backend","mock"},{"response",{{"boxes",Json::array({
+                {{"type","text"},{"bbox",{0,0,1,1}}}
+            })}}}}},
+            {"ocr_pool",{{"backend","mock"},{"max_inflight",1},
+                         {"response",{{"text","v2 recognition"}}}}}
+        }},
+        {"models",{
+            {"page_layout",{{"adapter","normalized"},{"executor","layout_pool"}}},
+            {"text_model",{{"adapter","vlm.ovisocr2"},{"executor","ocr_pool"}}},
+            {"title_model",{{"adapter","vlm.ovisocr2"},{"executor","ocr_pool"}}}
+        }},
+        {"pipeline",{{"layout",{{"model","page_layout"},{"coordinates","normalized"}}},
+                     {"routes",{{"text",{{"model","text_model"},{"cropper","bbox_crop"}}}}}}}};
+    auto runtime=normalize_config(c);
+    expect(runtime["version"]==1 && runtime["models"].size()==2 &&
+           runtime["layout"]["model"]=="layout_pool" &&
+           runtime["routes"]["text"]["model"]=="ocr_pool" &&
+           runtime["routes"]["text"]["adapter"]=="vlm.ovisocr2",
+           "v2 executor sharing and adapter binding");
+    validate_config(c);
+    TempDir temp;
+    const auto bytes=image().png();
+    { std::ofstream out(temp.path/"v2.png",std::ios::binary);
+      out.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size())); }
+    const auto doc=Pipeline(c).run(temp.path/"v2.png",temp.path/"out");
+    expect(doc.pages.size()==1 && doc.pages[0].regions.size()==1 &&
+           doc.pages[0].regions[0].model=="text_model" &&
+           doc.pages[0].regions[0].text=="v2 recognition",
+           "v2 bound model uses shared executor while recording binding ID");
+    c["models"]["text_model"]["executor"]="missing";
+    throws([&] { normalize_config(c); });
 }
 void pool_test() {
     struct State { std::atomic<int> active{0}, peak{0}, constructed{0}; } state;
@@ -296,7 +396,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

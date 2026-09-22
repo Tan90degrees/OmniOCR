@@ -25,6 +25,8 @@ jobs:
           python3 tests/document_integration.py build/omniocr
           python3 tests/input_formats_integration.py build/omniocr --external --ofd-converter tools/omniocr-ofd-to-pdf
           python3 tests/batch_integration.py build/omniocr
+          python3 tests/v3_http_integration.py build/omniocr
+          python3 tests/external_plugin_integration.py build/omniocr build/omniocr-server
           python3 tests/server_integration.py build/omniocr-server --formats
           for config in configs/*.json; do build/omniocr --config "$config" --validate; done
   onnx:

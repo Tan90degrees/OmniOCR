@@ -1,44 +1,57 @@
-name: ARM64 offline package
+name: Linux x64 and ARM64 offline packages
 on:
   workflow_dispatch:
   push:
     branches:
       - feat/ascend-ocr-framework
+      - feat/model-plugin-layout-v3
+      - main
     tags:
       - 'v*'
 permissions:
   contents: read
 jobs:
-  linux-arm64:
-    runs-on: ubuntu-24.04-arm
+  linux-package:
+    name: Native ${{ matrix.arch }} build and package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, machine: x86_64, runner: ubuntu-24.04}
+          - {arch: arm64, machine: aarch64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Install build and document dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab
-      - name: Build native ARM64 executable
+          sudo apt-get install -y cmake g++ file libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice fonts-noto-core libmicrohttpd-dev python3-reportlab python3-pil
+      - name: Build native executable (${{ matrix.arch }})
         run: |
-          test "$(uname -m)" = aarch64
-          bash -n packaging/make-arm64.sh packaging/run-arm64.sh packaging/verify-arm64.sh
-          cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release -DOMNIOCR_WITH_ACL=OFF -DOMNIOCR_WITH_ONNX=OFF -DOMNIOCR_WITH_SERVER=ON
-          cmake --build build-arm64 -j2
-          ctest --test-dir build-arm64 --output-on-failure
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          bash -n packaging/make-linux.sh packaging/run-linux.sh packaging/verify-linux.sh
+          cmake -S . -B build-${{ matrix.arch }} -DCMAKE_BUILD_TYPE=Release -DOMNIOCR_WITH_ACL=OFF -DOMNIOCR_WITH_ONNX=OFF -DOMNIOCR_WITH_SERVER=ON
+          cmake --build build-${{ matrix.arch }} -j2
+          ctest --test-dir build-${{ matrix.arch }} --output-on-failure
       - name: Assemble offline archive and smoke test
         shell: bash
         run: |
           set -euo pipefail
           version="$(git describe --tags --always | tr -c 'A-Za-z0-9._-' '-')"
-          name="omniocr-${version}-linux-arm64-offline"
-          bash packaging/make-arm64.sh build-arm64 "$RUNNER_TEMP/$name"
+          name="omniocr-${version}-linux-${{ matrix.arch }}-offline"
+          bash packaging/make-linux.sh build-${{ matrix.arch }} "$RUNNER_TEMP/$name" "${{ matrix.arch }}"
           (cd "$RUNNER_TEMP/$name" && ./verify.sh)
+          export PACKAGE_DIR="$RUNNER_TEMP/$name"
+          echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
           python3 tests/server_integration.py "$RUNNER_TEMP/$name/server.sh"
+          python3 tests/v3_http_integration.py "$RUNNER_TEMP/$name/run.sh"
+          python3 tests/external_plugin_integration.py "$RUNNER_TEMP/$name/run.sh" "$RUNNER_TEMP/$name/server.sh"
           python3 - <<'PY'
           from pathlib import Path
           import os
           root=Path(os.environ['RUNNER_TEMP'])
-          bundle=next(root.glob('omniocr-*-linux-arm64-offline'))
+          bundle=Path(os.environ['PACKAGE_DIR'])
           (root/'fixture.ppm').write_bytes(b'P6\n20 10\n255\n'+b'\xff'*600)
           os.system('true')
           import subprocess
@@ -49,10 +62,10 @@ jobs:
           (cd "$RUNNER_TEMP" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "ARCHIVE=$RUNNER_TEMP/$name.tar.gz" >> "$GITHUB_ENV"
           echo "CHECKSUM=$RUNNER_TEMP/$name.tar.gz.sha256" >> "$GITHUB_ENV"
-      - name: Upload ARM64 package
+      - name: Upload architecture-specific offline package
         uses: actions/upload-artifact@v4
         with:
-          name: omniocr-linux-arm64-offline
+          name: omniocr-linux-${{ matrix.arch }}-offline
           path: |
             ${{ env.ARCHIVE }}
             ${{ env.CHECKSUM }}

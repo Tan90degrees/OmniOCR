@@ -34,7 +34,7 @@ public:
     Json infer(const Image&, const std::string&) override { return config_.at("response"); }
 };
 }
-std::unique_ptr<Model> make_model(const Json& config, size_t instance) {
+std::unique_ptr<Model> make_legacy_model(const Json& config, size_t instance) {
     const auto backend = config.at("backend").get<std::string>();
     if (backend == "vllm" || backend == "http_json") return std::make_unique<HttpModel>(config);
     if (backend == "mock") return std::make_unique<MockModel>(config);

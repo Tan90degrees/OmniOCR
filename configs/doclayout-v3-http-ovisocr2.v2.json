@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "executors": {
+    "layout_service": {
+      "backend": "http_json",
+      "endpoint": "http://127.0.0.1:8001/layout",
+      "max_inflight": 2,
+      "timeout_seconds": 120
+    },
+    "ocr_service": {
+      "backend": "openai_chat",
+      "endpoint": "http://127.0.0.1:18070/v1/chat/completions",
+      "served_model": "ovisocr2",
+      "max_inflight": 4,
+      "parameters": {"temperature": 0, "max_tokens": 4096}
+    }
+  },
+  "models": {
+    "layout_v3": {"adapter": "paddle.doclayout_v3.http", "executor": "layout_service"},
+    "shared_ocr": {"adapter": "vlm.ovisocr2", "executor": "ocr_service"}
+  },
+  "pipeline": {
+    "layout": {
+      "model": "layout_v3",
+      "coordinates": "pixel",
+      "type_map": {"doc_title": "title", "paragraph_title": "heading"}
+    },
+    "routes": {
+      "text": {"task": "text_recognition", "model": "shared_ocr",
+               "cropper": "polygon_mask_crop", "crop_fallback": "bbox_crop"},
+      "title": {"task": "text_recognition", "model": "shared_ocr",
+                "cropper": "bbox_crop"},
+      "heading": {"task": "text_recognition", "model": "shared_ocr",
+                  "cropper": "bbox_crop"},
+      "table": {"task": "table_recognition", "model": "shared_ocr",
+                "adapter": "vlm.ovisocr2", "cropper": "bbox_crop"},
+      "image": {"action": "save_crop", "cropper": "bbox_crop"},
+      "*": {"task": "text_recognition", "model": "shared_ocr", "cropper": "bbox_crop"}
+    }
+  },
+  "output": {"schema_version": 2},
+  "execution": {"workers": 4, "on_error": "record"}
+}
