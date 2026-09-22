@@ -29,6 +29,7 @@ void positive(const Json& j, const char* key, int fallback, int max) {
 }
 }
 void validate_config(const Json& c) {
+    load_plugins(c);
     require(c.contains("version") && c.at("version").is_number_integer() &&
             c.at("version").get<int64_t>() == 1, "version must be 1");
     const auto& models = c.at("models");
@@ -151,6 +152,10 @@ Json load_config(const fs::path& path) {
     std::ifstream in(path);
     if (!in) throw std::runtime_error("cannot open config: " + path.string());
     Json c; in >> c;
+    if (c.contains("plugins")) for (auto& plugin : c["plugins"]) {
+        if (plugin.contains("library")) plugin["library"] =
+            fs::absolute(path.parent_path() / plugin["library"].get<std::string>()).string();
+    }
     validate_config(c);
     // Model assets are resolved relative to the config, never the process cwd.
     for (auto& m : c["models"]) {
