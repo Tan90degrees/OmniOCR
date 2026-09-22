@@ -4,12 +4,15 @@
 #include <stdexcept>
 
 namespace omniocr {
-Json document_json(const Document& doc) {
+Json document_json(const Document& doc, int requested_schema) {
     bool schema_v2 = false;
     for (const auto& page : doc.pages) for (const auto& region : page.regions)
         if (!region.box.polygon.empty() || !region.box.reading_order ||
             region.box.provenance.value("adapter", std::string{}) == "paddle.doclayout_v3.http")
             schema_v2=true;
+    if (requested_schema!=0 && requested_schema!=1 && requested_schema!=2)
+        throw std::runtime_error("invalid output schema version");
+    if (requested_schema) schema_v2=requested_schema==2;
     Json out = {{"schema_version", schema_v2 ? 2 : 1},
                 {"source", doc.source}, {"coordinate_system", "page_pixels_xyxy"},
                 {"pages", Json::array()}};
@@ -61,7 +64,8 @@ std::string document_markdown(const Document& doc) {
     }
     return out.str();
 }
-void write_outputs(const Document& doc, const fs::path& dir, const std::string& format) {
+void write_outputs(const Document& doc, const fs::path& dir, const std::string& format,
+                   int schema_version) {
     if (format != "json" && format != "markdown" && format != "both") throw std::runtime_error("format must be json, markdown or both");
     fs::create_directories(dir);
     auto write = [&](const char* name, const std::string& content) {
@@ -69,7 +73,7 @@ void write_outputs(const Document& doc, const fs::path& dir, const std::string& 
         { std::ofstream out(tmp); out << content; out.close(); if (!out) throw std::runtime_error("cannot write output"); }
         fs::rename(tmp, path);
     };
-    if (format != "markdown") write("result.json", document_json(doc).dump(2));
+    if (format != "markdown") write("result.json", document_json(doc, schema_version).dump(2));
     if (format != "json") write("result.md", document_markdown(doc));
 }
 } // namespace omniocr
