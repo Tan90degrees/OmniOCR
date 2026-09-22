@@ -100,7 +100,7 @@ std::vector<Box> parse_doclayout_v3(const Json& response, const Json& layout, in
         } else throw std::runtime_error("V3 region missing bbox and polygon");
         if (b.bbox[2]<=b.bbox[0] || b.bbox[3]<=b.bbox[1])
             throw std::runtime_error("empty or inverted V3 bbox");
-        b.provenance={{"adapter","paddle.doclayout_v3.http"}};
+        b.provenance={{"adapter",layout.value("adapter",layout.at("provider").get<std::string>())}};
         if (item.contains("mask_ref")) {
             if (!item.at("mask_ref").is_string()) throw std::runtime_error("V3 mask_ref must be string");
             b.extensions["paddle.mask_ref"]=item.at("mask_ref");
