@@ -5,6 +5,16 @@
 #include <vector>
 
 namespace omniocr {
+// Request-local mapping from model coordinates to original rendered-page pixels.
+// Only planar transforms are represented here; curved-page unwarping needs a
+// separate mesh-based geometry plugin.
+struct TransformContext {
+    int page_width = 0, page_height = 0;
+    std::array<double,9> model_to_page{1,0,0, 0,1,0, 0,0,1};
+    std::array<double,2> to_page(double x, double y) const;
+};
+TransformContext make_transform_context(const Json& layout, int page_width, int page_height);
+
 // Built-in adapters are registered once per process. Startup registration is
 // permitted; all registration must finish before Pipeline workers start.
 using LayoutAdapter = std::function<std::vector<Box>(const Json&, const Json&, int, int)>;
