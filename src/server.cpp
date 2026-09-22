@@ -112,6 +112,7 @@ class ServerScheduler {
     };
     Pipeline pipeline_;
     Json document_settings_;
+    int schema_version_ = 0;
     Options options_;
     std::mutex mutex_;
     std::condition_variable changed_;
@@ -145,7 +146,7 @@ class ServerScheduler {
     }
     void finalize(const std::shared_ptr<Job>& job, const Document& doc) {
         try {
-            write_outputs(doc, job->output, "both");
+            write_outputs(doc, job->output, "both", schema_version_);
             std::lock_guard<std::mutex> guard(mutex_);
             if (job->state == "finalizing") {
                 job->state = "succeeded";
@@ -258,6 +259,7 @@ class ServerScheduler {
 public:
     explicit ServerScheduler(Json config, Options options)
         : pipeline_(config), document_settings_(config.value("document", Json::object())),
+          schema_version_(config.value("output",Json::object()).value("schema_version",0)),
           options_(std::move(options)) {
         fs::create_directories(options_.data_dir / "jobs");
         fs::permissions(options_.data_dir / "jobs", fs::perms::owner_all,
