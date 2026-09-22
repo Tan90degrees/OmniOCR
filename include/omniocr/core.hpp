@@ -66,6 +66,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+Json normalize_config(const Json&);
 Json load_config(const fs::path&);
 void validate_config(const Json&);
 std::vector<Box> parse_layout(const Json& response, const Json& layout, int width, int height);
