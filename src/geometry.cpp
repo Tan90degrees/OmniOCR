@@ -4,6 +4,42 @@
 #include <stdexcept>
 
 namespace omniocr {
+std::array<double,2> TransformContext::to_page(double x,double y) const {
+    if (!std::isfinite(x) || !std::isfinite(y)) throw std::runtime_error("nonfinite input point");
+    const auto& m=model_to_page;
+    const double z=m[6]*x+m[7]*y+m[8];
+    if (!std::isfinite(z) || std::abs(z)<1e-12) throw std::runtime_error("invalid perspective transform");
+    const double px=(m[0]*x+m[1]*y+m[2])/z;
+    const double py=(m[3]*x+m[4]*y+m[5])/z;
+    if (!std::isfinite(px) || !std::isfinite(py)) throw std::runtime_error("nonfinite mapped point");
+    return {std::clamp(px,0.,double(page_width)),std::clamp(py,0.,double(page_height))};
+}
+TransformContext make_transform_context(const Json& layout,int width,int height) {
+    if (width<=0 || height<=0) throw std::runtime_error("invalid rendered-page dimensions");
+    TransformContext result; result.page_width=width; result.page_height=height;
+    const auto coordinates=layout.value("coordinates",std::string("pixel"));
+    if (coordinates=="normalized") {
+        result.model_to_page={double(width),0,0, 0,double(height),0, 0,0,1};
+    } else if (coordinates=="model_input") {
+        const auto size=layout.at("image_size");
+        if (!size.is_array() || size.size()!=2 || size[0].get<int>()<=0 || size[1].get<int>()<=0)
+            throw std::runtime_error("invalid model input dimensions");
+        result.model_to_page={double(width)/size[0].get<int>(),0,0,
+                              0,double(height)/size[1].get<int>(),0, 0,0,1};
+    } else if (coordinates!="pixel") throw std::runtime_error("unsupported layout coordinate system");
+    if (layout.contains("transform")) {
+        if (coordinates!="model_input") throw std::runtime_error("explicit transform requires model_input coordinates");
+        const auto& t=layout.at("transform").at("matrix");
+        if (!t.is_array() || t.size()!=9) throw std::runtime_error("transform matrix must contain 9 numbers");
+        for (size_t i=0;i<9;++i) {
+            if (!t[i].is_number()) throw std::runtime_error("transform matrix element must be numeric");
+            result.model_to_page[i]=t[i].get<double>();
+            if (!std::isfinite(result.model_to_page[i]))
+                throw std::runtime_error("transform matrix contains nonfinite value");
+        }
+    }
+    return result;
+}
 namespace {
 bool contains(const std::vector<std::array<double,2>>& polygon, double x, double y) {
     bool inside=false;
