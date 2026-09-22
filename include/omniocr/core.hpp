@@ -30,6 +30,7 @@ struct Box {
     std::optional<int> reading_order; // null means excluded from body ordering
     size_t source_index = 0;
     std::vector<std::array<double, 2>> polygon; // original rendered page pixel coordinates
+    std::optional<std::array<double, 4>> crop_bbox; // OCR crop may differ from detector bbox
     Json provenance = Json::object(), extensions = Json::object();
 };
 struct Region {
