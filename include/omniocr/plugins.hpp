@@ -13,6 +13,7 @@ struct RecognitionResult { std::string text, raw_text; };
 using RecognitionAdapter = std::function<RecognitionResult(const Json&, const Json&)>;
 using BackendFactory = std::function<std::unique_ptr<Model>(const Json&, size_t)>;
 
+void load_plugins(const Json& config); // load only trusted deployment configuration at startup
 void register_layout_adapter(std::string id, LayoutAdapter adapter);
 void register_crop_adapter(std::string id, CropAdapter adapter);
 void register_recognition_adapter(std::string id, RecognitionAdapter adapter);
