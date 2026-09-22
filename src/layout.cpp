@@ -5,7 +5,7 @@
 #include <stdexcept>
 
 namespace omniocr {
-std::vector<Box> parse_layout(const Json& response, const Json& layout, int width, int height) {
+std::vector<Box> parse_legacy_layout(const Json& response, const Json& layout, int width, int height) {
     std::vector<Box> boxes;
     const auto provider = layout.at("provider").get<std::string>();
     auto aliases = layout.value("type_map", Json::object());
@@ -22,6 +22,9 @@ std::vector<Box> parse_layout(const Json& response, const Json& layout, int widt
         if (b.score < layout.value("score_threshold", 0.0)) return;
         b.raw_type = b.type;
         if (aliases.contains(b.type)) b.type = aliases.at(b.type).get<std::string>();
+        b.source_index = boxes.size();
+        b.reading_order = b.order;
+        b.provenance = {{"adapter", provider}};
         boxes.push_back(std::move(b));
         if (boxes.size() > layout.value("max_boxes", size_t(2000))) throw std::runtime_error("too many layout boxes");
     };
@@ -59,7 +62,10 @@ std::vector<Box> parse_layout(const Json& response, const Json& layout, int widt
             b.type = item.at(provider == "paddle" ? "label" : "type").get<std::string>();
             b.bbox = item.at(provider == "paddle" ? "coordinate" : "bbox").get<std::array<double, 4>>();
             b.score = item.value("score", 1.0);
-            b.order = item.value("order", int(boxes.size()));
+            b.order = int(boxes.size());
+            if (item.contains("order") && !item.at("order").is_null()) {
+                b.order = item.at("order").get<int>();
+            }
             b.rotation = item.value("rotation", 0);
             if (layout.value("coordinates", "pixel") == "normalized")
                 for (int i = 0; i < 4; ++i) b.bbox[i] *= i % 2 ? height : width;
