@@ -1,5 +1,7 @@
 # Linux ARM64 离线包
 
+[项目首页](../README.md) · [文档目录](../docs/README.md)
+
 由 GitHub Actions 的 `ARM64 offline package` 工作流生成。包包含 AArch64 `omniocr`、
 可选 REST 服务可执行程序 `omniocr-server`、其启动脚本 `server.sh`、
 程序依赖的非 glibc 共享库、Poppler 的 `pdfinfo`/`pdftoppm`、LibreOffice、
@@ -18,7 +20,7 @@ cd omniocr-*-linux-arm64-offline
 ./run.sh --config configs/demo.json --input /data/example.pdf --output /data/ocr-output
 ```
 
-`run.sh` 和 `server.sh` 通过仅修改子进程的 `PATH`、`LD_LIBRARY_PATH` 优先使用包内工具与非 glibc 共享库，仍依赖兼容的宿主动态链接器与 glibc，不修改父 shell 环境。可用 `--config` 指定模型配置；REST API 参见 `docs/server.md`。
+`run.sh` 和 `server.sh` 通过仅修改子进程的 `PATH`、`LD_LIBRARY_PATH` 优先使用包内工具与非 glibc 共享库，仍依赖兼容的宿主动态链接器与 glibc，不修改父 shell 环境。可用 `--config` 指定模型配置；REST API 参见 [REST 服务](../docs/server.md)。
 当前发布工作流的 CLI 关闭 ACL/ONNX，仅支持 HTTP/vLLM 和 mock。
 ONNX/ACL 离线分发须另外提供匹配的 ARM64 SDK/运行时及构建环境；
 NPU 实机验证与普通 ARM64 构建分开。
@@ -38,4 +40,4 @@ export OCR_API_KEY='replace-with-a-strong-secret'
 
 ## 新增输入格式依赖
 
-包内原生 libtiff 支持多页 TIF/TIFF；RTF、ODT/ODS/ODP、HTML/HTM、CSV 复用 LibreOffice。EPUB 需要匹配目标 ARM64 系统的 Calibre，OFD 需要 JRE 和 `tools/ofd-converter` 构建的 JAR；当前离线包不自动包含 Calibre/JRE/JAR，部署前需单独准备并通过 document.ebook_convert/ofd_converter 指定。不能把格式列表视为外部依赖已经安装。完整安装和验证步骤见 docs/input-formats.md。
+包内原生 libtiff 支持多页 TIF/TIFF；RTF、ODT/ODS/ODP、HTML/HTM、CSV 复用 LibreOffice。EPUB 需要匹配目标 ARM64 系统的 Calibre，OFD 需要 JRE 和 `tools/ofd-converter` 构建的 JAR；当前离线包不自动包含 Calibre/JRE/JAR，部署前需单独准备并通过 document.ebook_convert/ofd_converter 指定。不能把格式列表视为外部依赖已经安装。完整安装和验证步骤见 [输入格式](../docs/input-formats.md)。

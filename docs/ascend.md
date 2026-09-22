@@ -1,5 +1,7 @@
 # 昇腾部署与验证
 
+[项目首页](../README.md) · [文档目录](README.md)
+
 ## 组件部署
 
 推荐先用远端 VLM 完成真实文档基线，再逐个替换适合本地执行的小模型：
@@ -85,3 +87,7 @@ find /usr/local/Ascend -name 'libunified_dlog.so*' 2>/dev/null
 ```
 
 需根据堆栈区分是否发生在 `AclEngine::clear()` 的 dataset/buffer/desc/model/context 释放，还是静态 `Runtime` 的 `aclrtResetDevice()` / `aclFinalize()`，或其他动态库卸载阶段。进一步用 ACL+mock、纯 HTTP/mock 两组流程对照，检查镜像内 CANN 运行库、驱动挂载、共享库搜索路径与权限。未确认正常退出及重复运行资源释放前，本验收项保持未通过。
+
+## 相关文档
+
+[构建本地后端](getting-started.md#启用本地模型) · [模型配置](configuration.md) · [测试与验证](testing.md)

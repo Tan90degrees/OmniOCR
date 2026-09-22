@@ -1,5 +1,7 @@
 # 文件提取格式
 
+[项目首页](../README.md) · [文档目录](README.md)
+
 所有输入统一为页面 RGB 图像，再执行版面识别、BOX 路由和 Markdown/JSON 输出。单文件 CLI、批处理和 REST 复用同一个 reader 与扩展名注册表，大小写不敏感。这里的“提取”是视觉页面 OCR，不是直接导出 Office 对象模型、Excel 公式或电子书 DOM。
 
 | 输入 | 处理方式 | 依赖 |
@@ -74,3 +76,7 @@ python3 tests/server_integration.py build/omniocr-server --formats
 `--external` 强制要求真实 Calibre/OFD 工具，不会跳过缺失依赖。格式测试实际渲染文件并检查非空白页面、TIFF/OFD 页序、HTML 相对图片、资源限制、转换假成功和多格式批次；版面使用 mock，因此不能据此宣称真实 OCR 识别精度通过。Linux CI 包含这些步骤；ARM64 包的基础镜像仍需单独配置 Calibre/JRE/JAR 并做目标机验收。
 
 参考：[Calibre CLI](https://manual.calibre-ebook.com/generated/en/ebook-convert.html)、[OFDRW 导出器](https://github.com/ofdrw/ofdrw/blob/master/ofdrw-converter/doc/EXPORTER.md)。
+
+## 相关文档
+
+[快速上手](getting-started.md) · [REST 上传](server.md) · [测试与验证](testing.md)

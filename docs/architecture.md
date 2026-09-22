@@ -1,5 +1,7 @@
 # 架构与资源生命周期
 
+[项目首页](../README.md) · [文档目录](README.md)
+
 ## 模块边界
 
 | 模块 | 实现 | 责任 |
@@ -27,8 +29,7 @@
 
 单文件 `run()` 的进程总并发仍取决于外层调用数；单个 Pipeline 的模型池在这些调用之间共享，但每个调用有独立 BOX 线程组。多文件场景优先使用下述 `run_batch()` 全局页工作线程池。
 
-
-## 多文件与按页优先级调度（新增）
+## 多文件与按页优先级调度
 
 `Pipeline::run_batch(jobs, options)` 复用同一个 `ModelRegistry`，一次接收多个 `BatchJob{input, output_dir, priority}`。单个文档的读取/转换由最多 `max_active_documents` 个 reader 线程处理；每个 reader 依次把 PDF 页渲染成图片并放入全局 `max_queued_pages` 限长队列。最多 `page_workers` 个页面线程从就绪页中选择 **priority 数值更大** 的文件页面处理，同优先级按入队顺序处理。未就绪的高优先级页不会阻塞已经就绪的低优先级页；已开始的页不会抢占或中断。若高优先级文件持续产出页面，低优先级文件可能等待较久（本版未实现老化或时限公平调度）。
 
@@ -36,7 +37,7 @@
 
 一个文件出现文档/页级致命错误时，取消该文件尚未执行的页面；已启动的推理会完成并归还模型租约，其他文件继续处理。调用方收到按 **输入任务原顺序** 排列的 `BatchResult`，成功文档内部的页按原始页码升序输出。不同任务的输出目录必须互不重叠；一个文件的失败不应覆盖另一个文件的结果。BOX 级 `on_error: record` 仍保留部分结果，页渲染或版面失败仍属于文件级失败。
 
-当前是一次性批次 API，尚未提供服务化运行期间的动态提交、任务取消、优先级调整、持久化队列、跨进程调度或 SLA/抢占式调度。如果业务希望“新插队文件立即加入正在运行的批次”，需要在此页调度器基础上增加常驻队列及异步提交接口，而不是并发调用多个 `run()`。
+批处理 API 接收一次性提交的任务清单，使用方式见 [批处理指南](batch.md)。运行期间动态提交新文件请使用下节的常驻 REST 服务；两种方式都不提供任务取消、运行中优先级调整、持久化队列、跨进程调度或抢占式调度。
 
 ## 常驻 REST 服务调度
 
@@ -59,3 +60,22 @@ Office 转换使用唯一临时目录与唯一 LibreOffice 用户配置；通过
 JSON 坐标固定为渲染页像素 `[x1,y1,x2,y2]`，page 从 1 开始，rotation 为逆时针角度。BOX 包含规范化类型、原始类型、顺序、置信度、使用的模型 ID、文本、裁剪路径、错误；表格同时保留 `raw_text`。阅读顺序来自模型返回的 order，否则使用模型返回顺序，不用简单坐标排序冒充多栏阅读顺序。
 
 Markdown 可保留模型输出的 Markdown/HTML；OTSL 被转成支持 rowspan/colspan 的 HTML 表格。原样 HTML 属于模型内容，下游网页渲染时应按自己的显示策略处理。格式输出不包含 token 使用量、合并跨页表格、OCR 精度评价或复杂公式纠错。
+
+## C++ 集成
+
+在仓库根目录运行的应用中，可按以下方式复用 Pipeline：
+
+```cpp
+#include <omniocr/core.hpp>
+
+auto config = omniocr::load_config("configs/mineru-vllm.json");
+omniocr::Pipeline pipeline(config); // 加载模型一次，可顺序复用处理多个文档
+auto document = pipeline.run("document.pdf", "out/document");
+omniocr::write_outputs(document, "out/document", "both");
+```
+
+可通过 `ModelFactory` 注入自定义 `Model`，或实现 `TensorEngine` 并配套模型预处理/解码器。布局与识别共用模型注册表；不要在 BOX 回调中重新创建模型。外层如需并发调用 `run()`，应自行限制文档并发，因为工作线程上限是每次调用的上限。
+
+## 相关文档
+
+[批处理用法](batch.md) · [REST API](server.md) · [配置参考](configuration.md)

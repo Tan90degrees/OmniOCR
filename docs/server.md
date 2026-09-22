@@ -1,5 +1,7 @@
 # OmniOCR REST 服务
 
+[项目首页](../README.md) · [文档目录](README.md)
+
 C++ 常驻服务通过 libmicrohttpd 提供异步任务接口，所有文件共享同一模型注册表和全局优先级页面队列。客户端提交后收到任务 ID，不需要保持 HTTP 连接等待 OCR。
 
 ## 构建及启动
@@ -44,7 +46,7 @@ curl -X POST 'http://127.0.0.1:8080/v1/jobs/upload?extension=.pdf&priority=100' 
   --data-binary '@/home/user/book.pdf'
 ```
 
-请求体直接是**原始文件字节**，不是 JSON、base64 或 multipart 表单。查询参数 `extension` 必填，限定为受支持的图片/PDF/Office 后缀；不使用客户端文件名构造任意路径。服务在接收 HTTP 数据块时将内容写入任务独立的暂存文件，而不是把整个文件放在请求内存。默认大小上限 64 MiB，可由 `--max-upload-bytes` 修改；超限返回 413，空内容返回 400。PDF 页数、像素限制沿用现有文档配置。
+请求体直接是**原始文件字节**，不是 JSON、base64 或 multipart 表单。查询参数 `extension` 必填，限定为[输入格式表](input-formats.md)中的受支持后缀；不使用客户端文件名构造任意路径。服务在接收 HTTP 数据块时将内容写入任务独立的暂存文件，而不是把整个文件放在请求内存。默认大小上限 64 MiB，可由 `--max-upload-bytes` 修改；超限返回 413，空内容返回 400。PDF 页数、像素限制沿用现有文档配置。
 
 两种提交成功均返回 **HTTP 202** 和：
 
@@ -78,3 +80,7 @@ ARM64 离线包在启用服务端构建的工作流通过后包含 `server.sh`�
 路径提交与二进制上传共用 [输入格式注册表](input-formats.md)，支持 PDF、扫描/拍摄图片（含多页 TIFF）、DOC/DOCX、PPT/PPTX、XLS/XLSX、RTF、ODT/ODS/ODP、EPUB、OFD、HTML/HTM、CSV。扩展名大小写不敏感。
 
 `POST /v1/jobs/upload?extension=.csv` 仍接收原始文件二进制；不改变现有任务、优先级与结果 API。HTTP 202 表示入队，不代表转换成功；缺失 Calibre/OFD 工具或无效文件会通过任务的 failed/error 返回。上传 HTML 不能携带邻接资源目录，应使用自包含 HTML；路径提交可解析文件旁的相对图片。服务进程需有对应转换器和字体。
+
+## 相关文档
+
+[REST 演示](getting-started.md#启动-rest-演示) · [输入格式](input-formats.md) · [调度原理](architecture.md)

@@ -1,221 +1,122 @@
 # OmniOCR
 
-面向昇腾生态的 C++17 文档 OCR 框架。统一处理图片、PDF、Word、PPT、Excel，通过可配置版面分析与 BOX 路由，组合远程 vLLM、Ascend ACL/OM 和 ONNX Runtime，输出 Markdown 与 JSON。
+**面向昇腾生态的 C++17 文档 OCR 框架：多格式输入、按版面区域选择模型、统一输出 Markdown 与 JSON。**
 
-当前为可编译、带集成测试的 **0.1 基线**。真实模型的权重、导出签名、前后处理参数和目标 CANN/vLLM 版本需要随部署确定；不会把“有推理接口”当成“任意模型即插即用”。
+OmniOCR 将文档转成页面图像，使用 PaddleLayout 或 MinerU2.5-Pro 协议进行版面分析，再把正文、标题、表格、公式等区域（BOX）分配给配置的模型。可以混合使用远程 vLLM/HTTP 服务、本地 Ascend ACL/OM 和 ONNX Runtime，并在不同区域类型之间共享模型实例。
+
+[快速上手](docs/getting-started.md) · [文档目录](docs/README.md) · [配置参考](docs/configuration.md) · [REST API](docs/server.md) · [昇腾部署](docs/ascend.md)
+
+## 可以做什么
+
+- **统一提取文件**：图片、PDF、Office、RTF、OpenDocument、EPUB、OFD、HTML、CSV。
+- **按 BOX 配置模型**：不同类型使用不同模型，或共享同一模型池；支持按顺序尝试备选模型。
+- **选择运行方式**：单文件 CLI、一次性批处理、可持续提交任务的 REST 服务、C++ API。
+- **控制资源与并发**：模型实例池、页面队列、转换并发、页数/像素/超时限制。
+- **统一消费结果**：Markdown、结构化 JSON 和可选图片裁剪；保留页序、阅读顺序和错误信息。
 
 ## 处理流程
 
 ```mermaid
 flowchart TD
-  A[图片 / PDF / Office] --> B[逐页图像]
-  B --> C[Paddle / MinerU 版面分析]
-  C --> D[类型映射与 BOX 路由]
-  D --> E[共享模型实例池]
-  E --> F[vLLM HTTP]
-  E --> G[ACL OM]
-  E --> H[ONNX Runtime]
-  F --> I[按页与阅读顺序汇总]
-  G --> I
-  H --> I
-  I --> J[Markdown / JSON / 图片资源]
+  A["文件 → 页面图像"] --> B["Paddle / MinerU 版面分析"]
+  B --> C["BOX 类型映射与路由"]
+  C --> D["共享模型实例池"]
+  D --> E["vLLM / HTTP 服务"]
+  D --> F["Ascend ACL / OM"]
+  D --> G["ONNX Runtime"]
+  E --> H["按页与阅读顺序汇总"]
+  F --> H
+  G --> H
+  H --> I["Markdown / JSON / 图片资源"]
 ```
 
-每个模型 ID 只创建一个实例池，多个 BOX 类型引用同一 ID 时共用池；布局阶段也可以引用同一 ID。对 OM/ONNX，`instances` 是实际加载的模型实例数；对 vLLM，它是客户端最大在途请求数，服务端模型副本由 vLLM 的部署管理。
+`models` 定义模型池，`layout.model` 选择版面模型，`routes` 按 BOX 类型选择模型或执行保存图片、跳过识别等动作。多个类型引用**同一个模型 ID** 就共享实例池；不同 ID 即使指向同一文件也会分别加载。
 
-## 能力与边界
+本地 OM/ONNX 的 `instances` 是加载的实例数；vLLM/HTTP 的 `instances` 是客户端在途请求槽位，服务端副本需要自行部署。详见 [配置与模型适配](docs/configuration.md)。
 
-| 模块 | 当前实现 | 部署条件 / 边界 |
+## 支持的文件
+
+| 输入 | 后缀 | 运行依赖 |
 |---|---|---|
-| 扫描/拍摄图片 | PNG、JPEG、BMP、PPM/PGM、TGA、TIFF/TIF；RGB、透明背景合成 | TIFF 支持多页（libtiff）；暂不含 WebP/HEIC |
-| PDF | Poppler 按页渲染、数字页序、页数和像素上限 | 需要 `pdfinfo`、`pdftoppm` |
-| Word/PPT/Excel、RTF、ODF | DOC/DOCX、PPT/PPTX、XLS/XLSX、RTF、ODT/ODS/ODP → PDF | LibreOffice；沿用打印分页，不读取 Excel 公式语义或隐藏工作表 |
-| HTML/HTM、CSV | HTML 静态页面；CSV 字面文本表格 → PDF | LibreOffice；CSV 为 UTF-8，可配置分隔符，不执行公式 |
-| EPUB | Calibre 转 PDF 后逐页 OCR | 需要 `ebook-convert`，按渲染分页 |
-| OFD | OFDRW/PDFBox 转 PDF 后逐页 OCR | 提供 Java 转换工具；需要 JRE 和构建后的 JAR |
-| PaddleLayout | Paddle JSON 适配器；本地 `[N,6]` 检测输出解码 | 本地导出需匹配模型输入、类别表、坐标约定；V2 的阅读顺序网络不能用单个检测输出替代 |
-| MinerU2.5-Pro | vLLM 版面 token、0–1000 坐标、旋转、分块识别 | 示例针对官方 MinerU 版面协议，需匹配实际权重和服务版本 |
-| vLLM | OpenAI 兼容多模态 Chat Completions | 完整 endpoint、模型名、按 BOX 配置 prompt；不在客户端启动 vLLM |
-| ONNX | 原生 ONNX Runtime C++ Session | 当前使用 CPU EP；输入为 float32，内置 Paddle 检测 / CTC 解码 |
-| ACL | OM 加载、独立 context、设备内存、H2D/执行/D2H | 可选编译；初版只支持 host 模式、静态 shape、float32 输入；需昇腾设备验证 |
-| 并发 | 固定数量 BOX 工作线程、共享实例池、获取实例超时 | 每次 `run()` 逐页处理，最多保留一页图像及有限个裁剪；文本结果保存在内存 |
-| 输出 | Markdown、JSON、图片裁剪、OTSL→HTML 合并表格 | 保留原始表格文本；不做跨页表格/段落合并 |
+| 扫描/拍摄图片 | `.png .jpg .jpeg .bmp .ppm .pgm .tga` | 内置图像解码 |
+| 多页 TIFF | `.tif .tiff` | libtiff |
+| PDF / 扫描 PDF | `.pdf` | Poppler |
+| Word / PowerPoint / Excel | `.doc .docx .ppt .pptx .xls .xlsx` | LibreOffice + Poppler |
+| RTF / OpenDocument | `.rtf .odt .ods .odp` | LibreOffice + Poppler |
+| 静态网页 / CSV | `.html .htm .csv` | LibreOffice + Poppler |
+| EPUB | `.epub` | Calibre + Poppler |
+| OFD | `.ofd` | Java + OFDRW 转换器 + Poppler |
 
-完整格式、依赖与配置见 [输入格式说明](docs/input-formats.md)。`omniocr --list-formats` 列出可路由的扩展名；转换器是否已安装须按部署环境确认。
+提取基于**渲染后的页面 OCR**：Office 沿用打印分页，CSV 按字面文本渲染，HTML 不执行浏览器 JavaScript。依赖安装、编码、分页和格式限制见 [输入格式说明](docs/input-formats.md)。`--list-formats` 列出支持的后缀，不检查转换器是否已安装。
 
-## 构建
+## 快速跑通
 
-Linux x86_64 / aarch64，GCC 支持 C++17，CMake ≥ 3.20。
+以下为 Ubuntu 源码构建示例；Linux x86_64 / aarch64 均需 C++17 编译器与 CMake ≥ 3.20。默认构建可使用远程模型服务，不依赖 NPU 或 ONNX SDK。
 
 ```bash
-sudo apt-get install -y g++ cmake libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev poppler-utils libreoffice
+git clone https://github.com/Tan90degrees/OmniOCR.git
+cd OmniOCR
+sudo apt-get update
+sudo apt-get install -y g++ cmake git libcurl4-openssl-dev libtiff-dev nlohmann-json3-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j4
 ctest --test-dir build --output-on-failure
 ```
 
-默认构建不依赖 NPU 或 ONNX SDK，可直接使用 vLLM/HTTP。JSON 优先使用已安装依赖；图像编解码使用固定提交的 stb。离线构建可指定：
+准备一张自己的 `example.png`，运行不需要模型的演示：
 
 ```bash
-cmake -S . -B build \
-  -DSTB_INCLUDE_DIR=/opt/deps/stb \
-  -DNLOHMANN_JSON_INCLUDE_DIR=/opt/deps/json/include
+./build/omniocr --config configs/demo.json --input example.png --output out/demo --format both
 ```
 
-启用本地推理：
+输出为 `out/demo/result.md`、`out/demo/result.json` 和按配置生成的 `assets/`。**demo 使用 Mock，输出包含 `[MOCK]`，用于验证流程，不执行真实 OCR。** 输出目录必须不存在或为空；重复运行请换新目录。
 
-```bash
-cmake -S . -B build-ascend \
-  -DOMNIOCR_WITH_ACL=ON -DASCEND_HOME=/usr/local/Ascend/ascend-toolkit/latest \
-  -DOMNIOCR_WITH_ONNX=ON -DONNXRUNTIME_ROOT=/opt/onnxruntime
-cmake --build build-ascend -j4
-```
+要处理 PDF/Office，先按 [输入格式说明](docs/input-formats.md) 安装转换器。完整构建选项、离线依赖、CLI 用法和 REST 演示见 [快速上手](docs/getting-started.md)；ARM64 预构建包见 [离线包说明](packaging/README.md)。
 
-`ASCEND_HOME` 下需有 `include/acl/acl.h` 和 `lib64/libascendcl.so`；`ONNXRUNTIME_ROOT` 下需有 `include/onnxruntime_cxx_api.h` 和 `lib/libonnxruntime.so`。SDK 必须匹配主机架构，运行时需能找到对应动态库。详见 [昇腾部署](docs/ascend.md)。
+## 接入真实模型
 
-## 快速运行
+| 场景 | 从哪个配置开始 | 接入前需要确认 |
+|---|---|---|
+| MinerU 布局与识别共享服务 | [mineru-vllm.json](configs/mineru-vllm.json) | 服务已启动，endpoint、模型名和特殊 token 配置匹配 |
+| Paddle 布局服务 + vLLM 识别 | [paddle-http-vllm.json](configs/paddle-http-vllm.json) | Paddle 桥接服务及识别服务均已配置 |
+| ONNX 布局 + ACL 文字识别 + vLLM 表格/公式 | [paddle-local.json](configs/paddle-local.json) | 启用本地后端，核对模型签名、预处理、词表和 BOX 语义 |
+| 无模型流程演示 | [demo.json](configs/demo.json) | 仅用于流程与调度验证 |
 
-无需模型的流水线演示（结果显式标为 MOCK，不用于评估识别精度）：
-
-```bash
-./build/omniocr --config configs/demo.json --input document.pdf --output out/demo
-```
-
-真实 MinerU 服务：
-
-```bash
-./build/omniocr --config configs/mineru-vllm.json --input document.docx --output out/mineru --format both
-```
-
-`--output` 必须是不存在或为空的目录，避免覆盖已有结果。`--format` 支持 `both`（默认）、`json`、`markdown`。输出包含 `result.json`、`result.md`，以及配置了图片保存的 `assets/`。输入/配置路径支持空格和单引号。
+修改对应配置后，在仓库根目录执行，例如：
 
 ```bash
 ./build/omniocr --config configs/mineru-vllm.json --validate
+./build/omniocr --config configs/mineru-vllm.json --input example.png --output out/mineru --format both
 ```
 
-此命令检查配置结构和引用关系，不加载权重、不探测服务。正常完成返回 0；致命错误返回 1；`on_error: record` 下输出部分结果并返回 2。转换/布局失败始终属于致命错误。失败运行可能留下已写出的裁剪文件，重试请使用新的输出目录。
+`--validate` 只检查配置结构与引用，不加载模型、不探测服务。配置模板需要匹配真实部署；OmniOCR 不附带模型权重，也不自动启动 vLLM。
 
-## REST API 服务
+本地后端当前内置 Paddle 已解码检测框与 CTC 文字行解码，其他模型需要适配；CTC 不能直接替代多行段落、表格或公式模型。具体输入输出约定见 [模型适配](docs/configuration.md)，OM 编译与实机记录见 [昇腾部署](docs/ascend.md)。
 
-`omniocr-server` 是 C++ 常驻进程，可通过 HTTP 提交服务器允许目录下的文件路径，也可直接上传 PDF、图片或 Office 文件的原始二进制。提交后返回任务 ID，客户端异步查询状态和 JSON / Markdown 结果；运行期间新增文件进入**共享的页级优先级队列**。不必等待一个文件处理完才能提交下一个。
+## 选择运行方式
 
-```bash
-cmake -S . -B build -DOMNIOCR_WITH_SERVER=ON
-cmake --build build -j4
-./build/omniocr-server --config configs/demo.json --data-dir /tmp/omniocr-rest \
-  --allowed-input-root /data/documents --host 127.0.0.1 --port 8080
-curl -X POST http://127.0.0.1:8080/v1/jobs \
-  -H 'Content-Type: application/json' \
-  -d '{"path":"/data/documents/example.pdf","priority":100}'
-curl -X POST 'http://127.0.0.1:8080/v1/jobs/upload?extension=.pdf&priority=100' \
-  -H 'Content-Type: application/octet-stream' --data-binary @./example.pdf
-```
+| 需求 | 入口 | 说明 |
+|---|---|---|
+| 处理一个文件 | [CLI](docs/getting-started.md#cli-参数与输出) | `--input` / `--output`，按页处理 |
+| 一次提交多个文件 | [批处理](docs/batch.md) | `--batch jobs.json`，共享模型池和页级优先级队列 |
+| 运行中持续提交文件 | [REST 服务](docs/server.md) | 路径提交或原始二进制上传，异步查询状态与结果 |
+| 嵌入 C++ 应用 | [C++ 集成](docs/architecture.md#c-集成) | 复用 Pipeline，或扩展 Model / TensorEngine |
 
-编译服务端需要 `libmicrohttpd` 开发包；默认只监听本机地址，生产部署请启用 `--api-key-env` 并在 HTTPS 反向代理后加用户鉴权、限流。上述 demo 配置仅用于流程演示，使用 Ascend 310P3 + DocLayout/OvisOCR2 时需要实际的 ACL 和 vLLM 配置。完整接口、轮询结果、容量与安全约束详见 [REST 服务说明](docs/server.md)。
+优先级作用于已就绪页面，不抢占正在运行的推理。服务与批处理使用全局页面工作线程，每页 BOX 串行；单文件 CLI 的 BOX 并发由 `execution.workers` 控制。详见 [调度与资源生命周期](docs/architecture.md)。
 
-## 多文件优先级与 PDF 按页调度
+## 文档导航
 
-批处理使用**一个** Pipeline 和共享模型池，不需要对每个文件单独启动 OmniOCR 进程。
-例如创建 `jobs.json`（输入和输出路径相对于此清单所在目录）：
+| 文档 | 内容 |
+|---|---|
+| [文档目录](docs/README.md) | 按使用场景选择阅读路径 |
+| [快速上手](docs/getting-started.md) | 构建、离线依赖、首个任务、CLI 与 REST 演示 |
+| [输入格式](docs/input-formats.md) | 全部文件类型、转换器安装与内容边界 |
+| [配置与模型适配](docs/configuration.md) | 模型池、BOX 路由、fallback、后端协议、JSON 结果 |
+| [REST API](docs/server.md) | 启动、上传、路径提交、状态/结果、容量限制 |
+| [批处理](docs/batch.md) | 任务清单、优先级、并发参数和退出码 |
+| [架构与 C++ 集成](docs/architecture.md) | 模块边界、调度、资源生命周期、扩展接口 |
+| [昇腾部署](docs/ascend.md) | vLLM-Ascend、OM 适配、310P3 记录及已知问题 |
+| [测试与验证](docs/testing.md) | 测试命令、覆盖范围、实机与准确率验收边界 |
+| [ARM64 离线包](packaging/README.md) | 下载、运行、SDK 与转换器依赖 |
 
-```json
-{
-  "options": {
-    "page_workers": 4,
-    "max_active_documents": 2,
-    "max_queued_pages": 2
-  },
-  "jobs": [
-    {"input": "in/normal.pdf", "output": "out/normal", "priority": 0},
-    {"input": "in/urgent.pdf", "output": "out/urgent", "priority": 100},
-    {"input": "in/notes.docx", "output": "out/notes", "priority": 20}
-  ]
-}
-```
-
-```bash
-./build/omniocr --config configs/acl_vllm_ocr.json --batch /path/to/jobs.json --format both
-```
-
-上面的配置路径仅作示例，应改为实际存在的文件。单文件 `--input/--output` 命令保持兼容；`--batch` 与这两个参数不可并用。清单可直接写成任务数组，也可使用示例中的 `jobs/options` 对象。优先级越大，**已就绪**的页面越先调度；不抢占正在执行的页面。等优先级按入队顺序执行，各文件返回和写出的页序仍按原始页码排列。
-
-`page_workers` 默认取 `execution.workers`；`max_active_documents` 默认 2，`max_queued_pages` 默认 2。批处理模式下每页 BOX 串行处理，避免页面和 BOX 双层线程池相乘；NPU/vLLM 模型并发同时受到各自 `instances` 池大小约束。PDF/Office 转换子进程与页面推理可并行，总进程 CPU/内存仍需按文档尺寸配置。一个文件失败时，其他文件继续写结果；整个批次若有文件级失败，CLI 返回 1；仅有 `record` 模式 BOX 失败返回 2；全部成功返回 0。各任务输出目录必须互不重叠。
-
-此接口处理**一次性提交的批次**，暂不支持任务运行期间动态插入或调整优先级、跨进程持久化队列和页面级强制抢占。详见[调度说明](docs/architecture.md)。
-
-## 配置示例
-
-```json
-{
-  "version": 1,
-  "execution": {"workers": 8, "on_error": "fail"},
-  "layout": {"provider": "mineru", "model": "shared_vlm", "image_size": [1036, 1036]},
-  "models": {
-    "shared_vlm": {
-      "backend": "vllm", "instances": 4,
-      "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-      "model": "mineru", "acquire_timeout_ms": 240000,
-      "parameters": {"max_tokens": 8192, "skip_special_tokens": false}
-    },
-    "table_vlm": {
-      "backend": "vllm", "instances": 2,
-      "endpoint": "http://127.0.0.1:8002/v1/chat/completions",
-      "model": "table-model"
-    }
-  },
-  "routes": {
-    "text": {"model": "shared_vlm", "prompt": "\nText Recognition:"},
-    "title": {"model": "shared_vlm", "prompt": "\nText Recognition:"},
-    "table": {"model": "table_vlm", "prompt": "Table Recognition:"},
-    "image": {"action": "image"},
-    "*": {"model": "shared_vlm", "prompt": "\nText Recognition:"}
-  }
-}
-```
-
-这里 `text/title` 与版面分析共用 4 个客户端槽位，表格使用独立池。不同模型 ID 即使指向相同文件也会分别加载。要共享必须引用同一个 ID。
-
-完整示例：
-
-- [demo.json](configs/demo.json)：不依赖模型的演示。
-- [mineru-vllm.json](configs/mineru-vllm.json)：MinerU 布局与识别共享服务。
-- [paddle-http-vllm.json](configs/paddle-http-vllm.json)：Paddle 布局服务 + vLLM 识别。
-- [paddle-local.json](configs/paddle-local.json)：ONNX 布局 + ACL CTC + vLLM 表格/公式，属于需按实际导出修改的配置模板。
-
-Paddle 布局服务的可选桥接程序：
-
-```bash
-# 先安装适合当前设备的 PaddlePaddle，再安装 paddleocr、Pillow、numpy
-python tools/paddle_layout_server.py --model PP-DocLayoutV2 --device cpu --port 8001
-./build/omniocr --config configs/paddle-http-vllm.json --input scan.png --output out/paddle
-```
-
-桥接程序只承载 Paddle 模型，主流水线、调度、裁剪、本地推理与输出均为 C++。桥接服务默认监听 localhost，串行承载一个模型实例；真实 Paddle 权重未在当前开发环境下载验证。
-
-## C++ 集成
-
-```cpp
-#include <omniocr/core.hpp>
-
-auto config = omniocr::load_config("configs/mineru-vllm.json");
-omniocr::Pipeline pipeline(config); // 加载模型一次，可顺序复用处理多个文档
-auto document = pipeline.run("document.pdf", "out/document");
-omniocr::write_outputs(document, "out/document", "both");
-```
-
-可通过 `ModelFactory` 注入自定义 `Model`，或实现 `TensorEngine` 并配套模型预处理/解码器。布局与识别共用模型注册表；不要在 BOX 回调中重新创建模型。外层如需并发调用 `run()`，应自行限制文档并发，因为工作线程上限是每次调用的上限。
-
-## 验证
-
-```bash
-ctest --test-dir build --output-on-failure
-python3 -m pip install python-docx python-pptx openpyxl reportlab onnx
-python3 tests/document_integration.py build/omniocr
-python3 tests/onnx_integration.py build-ascend/omniocr
-```
-
-已验证：Linux C++ 编译；实例并发上限、异常归还、租用超时；Paddle/MinerU 模拟 HTTP 的真实 C++ 请求与裁剪；OTSL 合并单元格；DOC/DOCX/PPT/PPTX/XLS/XLSX 实际 LibreOffice 转换；12 页 PDF 数字顺序；真实 ONNX Runtime 执行生成的小模型与 shape 校验。
-
-尚未验证：Ascend ACL 编译与 NPU 实机执行、真实 Paddle/MinerU 权重的识别精度、特定 CANN/vLLM 组合的兼容性。此仓库不附带模型权重，也不声明已经完成这些验证。
-
-更多说明：[架构](docs/architecture.md) · [配置与模型适配](docs/configuration.md) · [昇腾部署](docs/ascend.md)。
+当前为 **0.1 基线**。已有自动化功能测试和用户提供的 310P3 真实 OCR 链路验证；全面准确率、性能与长期稳定性仍需目标环境验收。ACL 退出阶段 SIGSEGV 仍由 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 跟踪，结果生成不代表正常退出。验证依据与范围统一见 [测试文档](docs/testing.md) 和 [昇腾记录](docs/ascend.md)。
