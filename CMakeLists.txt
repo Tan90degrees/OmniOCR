@@ -32,11 +32,11 @@ if(NOT STB_INCLUDE_DIR)
     set(STB_INCLUDE_DIR "${stb_SOURCE_DIR}")
 endif()
 add_library(omniocr_core
-    src/config.cpp src/image.cpp src/model_pool.cpp src/layout.cpp src/plugins.cpp src/doclayout_v3.cpp src/geometry.cpp src/document.cpp
+    src/config.cpp src/image.cpp src/model_pool.cpp src/layout.cpp src/plugins.cpp src/plugin_loader.cpp src/doclayout_v3.cpp src/geometry.cpp src/document.cpp
     src/csv.cpp src/tiff.cpp src/pipeline.cpp src/batch.cpp src/output.cpp src/table.cpp src/backends/http.cpp src/backends/models.cpp
     src/backends/tensor.cpp src/backends/onnx.cpp src/backends/acl.cpp)
 target_include_directories(omniocr_core PUBLIC include PRIVATE "${STB_INCLUDE_DIR}")
-target_link_libraries(omniocr_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE CURL::libcurl TIFF::TIFF)
+target_link_libraries(omniocr_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE CURL::libcurl ${CMAKE_DL_LIBS} TIFF::TIFF)
 target_compile_options(omniocr_core PRIVATE -Wall -Wextra -Wpedantic)
 # stb is external C code compiled as C++; keep its warning policy isolated.
 set_source_files_properties(src/image.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
