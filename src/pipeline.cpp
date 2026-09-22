@@ -71,7 +71,11 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                                 auto decoded = decode_recognition(result, *route, region.box.type);
                                 region.raw_text = std::move(decoded.raw_text);
                                 region.text = std::move(decoded.text);
-                                region.model = candidate;
+                                // Expose the configured v2 model binding while leasing its
+                                // shared executor pool internally by candidate ID.
+                                if (route->contains("binding_ids") && route->at("binding_ids").contains(candidate))
+                                    region.model = route->at("binding_ids").at(candidate).get<std::string>();
+                                else region.model = route->value("binding_id", candidate);
                                 recognized = true;
                                 break;
                             } catch (const std::exception& e) {
