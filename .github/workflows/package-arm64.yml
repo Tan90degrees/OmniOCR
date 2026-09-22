@@ -42,7 +42,8 @@ jobs:
           name="omniocr-${version}-linux-${{ matrix.arch }}-offline"
           bash packaging/make-linux.sh build-${{ matrix.arch }} "$RUNNER_TEMP/$name" "${{ matrix.arch }}"
           (cd "$RUNNER_TEMP/$name" && ./verify.sh)
-          echo "PACKAGE_DIR=$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+          export PACKAGE_DIR="$RUNNER_TEMP/$name"
+          echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
           python3 tests/server_integration.py "$RUNNER_TEMP/$name/server.sh"
           python3 tests/v3_http_integration.py "$RUNNER_TEMP/$name/run.sh"
           python3 tests/external_plugin_integration.py "$RUNNER_TEMP/$name/run.sh" "$RUNNER_TEMP/$name/server.sh"
