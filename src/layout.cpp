@@ -23,7 +23,6 @@ std::vector<Box> parse_legacy_layout(const Json& response, const Json& layout, i
         b.raw_type = b.type;
         if (aliases.contains(b.type)) b.type = aliases.at(b.type).get<std::string>();
         b.source_index = boxes.size();
-        b.reading_order = b.order;
         b.provenance = {{"adapter", provider}};
         boxes.push_back(std::move(b));
         if (boxes.size() > layout.value("max_boxes", size_t(2000))) throw std::runtime_error("too many layout boxes");
@@ -34,7 +33,7 @@ std::vector<Box> parse_legacy_layout(const Json& response, const Json& layout, i
         const std::regex token(R"(<\|box_start\|>(\d+)\s+(\d+)\s+(\d+)\s+(\d+)<\|box_end\|><\|ref_start\|>(\w+)<\|ref_end\|>(?:<\|rotate_(up|right|down|left)\|>)?)");
         for (std::sregex_iterator it(text.begin(), text.end(), token), end; it != end; ++it) {
             ++matched;
-            Box b; b.type = (*it)[5].str(); b.order = int(boxes.size());
+            Box b; b.type = (*it)[5].str(); b.order = int(boxes.size()); b.reading_order=b.order;
             for (int i = 0; i < 4; ++i) {
                 const int n = std::stoi((*it)[i + 1].str());
                 if (n > 1000) throw std::runtime_error("MinerU coordinate outside 0..1000");
@@ -63,8 +62,10 @@ std::vector<Box> parse_legacy_layout(const Json& response, const Json& layout, i
             b.bbox = item.at(provider == "paddle" ? "coordinate" : "bbox").get<std::array<double, 4>>();
             b.score = item.value("score", 1.0);
             b.order = int(boxes.size());
-            if (item.contains("order") && !item.at("order").is_null()) {
+            if (!item.contains("order")) b.reading_order=b.order;
+            else if (!item.at("order").is_null()) {
                 b.order = item.at("order").get<int>();
+                b.reading_order=b.order;
             }
             b.rotation = item.value("rotation", 0);
             if (layout.value("coordinates", "pixel") == "normalized")
@@ -72,7 +73,12 @@ std::vector<Box> parse_legacy_layout(const Json& response, const Json& layout, i
             append(b);
         }
     }
-    std::stable_sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.order < b.order; });
+    std::stable_sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) {
+        if (bool(a.reading_order)!=bool(b.reading_order)) return bool(a.reading_order);
+        if (a.reading_order && b.reading_order && *a.reading_order!=*b.reading_order)
+            return *a.reading_order<*b.reading_order;
+        return a.source_index<b.source_index;
+    });
     return boxes;
 }
 } // namespace omniocr
