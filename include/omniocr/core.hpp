@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,7 +26,11 @@ struct Box {
     std::string type, raw_type;
     std::array<double, 4> bbox{};
     double score = 1;
-    int order = 0, rotation = 0;
+    int order = 0, rotation = 0; // legacy v1 order field
+    std::optional<int> reading_order; // null means excluded from body ordering
+    size_t source_index = 0;
+    std::vector<std::array<double, 2>> polygon; // original rendered page pixel coordinates
+    Json provenance = Json::object(), extensions = Json::object();
 };
 struct Region {
     Box box;
