@@ -98,6 +98,11 @@ void v3_plugin_test() {
     for (auto& box:boxes) { Region r; r.box=box; r.text=box.type; page.regions.push_back(r); }
     document.pages.push_back(page);
     auto output=document_json(document);
+    const auto forced_legacy=document_json(document,1);
+    expect(forced_legacy["schema_version"]==1 &&
+           !forced_legacy["pages"][0]["blocks"][1].contains("polygon") &&
+           forced_legacy["pages"][0]["blocks"][1]["id"]=="p1-b1",
+           "explicit v1 output drops V3 geometry only by caller request");
     expect(output["schema_version"]==2 && output["pages"][0]["blocks"][1]["polygon"].size()==3 &&
            output["pages"][0]["blocks"][2]["reading_order"].is_null() &&
            output["pages"][0]["blocks"][1]["id"]=="p1-s1" &&
