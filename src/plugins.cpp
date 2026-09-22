@@ -7,6 +7,7 @@ namespace omniocr {
 std::vector<Box> parse_legacy_layout(const Json&, const Json&, int, int);
 std::vector<Box> parse_doclayout_v3(const Json&, const Json&, int, int);
 std::unique_ptr<Model> make_legacy_model(const Json&, size_t);
+Image polygon_mask_crop(const Image&, const Box&, const Json&);
 namespace {
 struct Registry {
     std::mutex mutex;
@@ -24,9 +25,7 @@ struct Registry {
         crops.emplace("bbox_crop", [](const Image& img, const Box& b, const Json&) {
             return img.crop(b.bbox);
         });
-        crops.emplace("polygon_mask_crop", [](const Image&, const Box&, const Json&) -> Image {
-            throw std::runtime_error("polygon_mask_crop implementation not linked");
-        });
+        crops.emplace("polygon_mask_crop", polygon_mask_crop);
         recognition.emplace("text", [](const Json& raw, const Json&) {
             return RecognitionResult{raw.at("text").get<std::string>(), ""};
         });
