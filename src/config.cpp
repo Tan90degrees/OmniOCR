@@ -131,6 +131,14 @@ void validate_config(const Json& c) {
             }
         }
     }
+    const auto output = c.value("output", Json::object());
+    require(output.is_object(), "output must be an object");
+    if (output.contains("schema_version")) {
+        const auto& schema=output.at("schema_version");
+        require(schema.is_number_integer() &&
+                (schema.get<int64_t>()==1 || schema.get<int64_t>()==2),
+                "output.schema_version must be integer 1 or 2");
+    }
     const auto exec = c.value("execution", Json::object());
     positive(exec, "workers", 4, 128);
     require(exec.value("on_error", "fail") == "fail" || exec.value("on_error", "fail") == "record", "invalid on_error");
