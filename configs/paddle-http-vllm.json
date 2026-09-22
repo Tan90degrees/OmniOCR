@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "execution": {"workers": 8, "on_error": "record"},
+  "layout": {
+    "provider": "paddle", "model": "paddle_layout", "coordinates": "pixel",
+    "type_map": {"doc_title": "title", "paragraph_title": "heading", "display_formula": "formula", "figure": "image"}
+  },
+  "models": {
+    "paddle_layout": {
+      "backend": "http_json", "instances": 1,
+      "endpoint": "http://127.0.0.1:8001/layout", "timeout_seconds": 120
+    },
+    "ocr": {
+      "backend": "vllm", "instances": 4,
+      "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+      "model": "paddleocr-vl", "parameters": {"temperature": 0, "max_tokens": 4096}
+    }
+  },
+  "routes": {
+    "title": {"model": "ocr", "prompt": "OCR:"},
+    "heading": {"model": "ocr", "prompt": "OCR:"},
+    "text": {"model": "ocr", "prompt": "OCR:"},
+    "table": {"model": "ocr", "prompt": "Table Recognition:"},
+    "formula": {"model": "ocr", "prompt": "Formula Recognition:"},
+    "image": {"action": "image"},
+    "*": {"model": "ocr", "prompt": "OCR:"}
+  }
+}

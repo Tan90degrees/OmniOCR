@@ -67,3 +67,12 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Local model assets and generated document results
+models/
+out/
+__pycache__/
+*.pyc
+
+# Optional Java OFD converter build
+tools/ofd-converter/target/
