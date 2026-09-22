@@ -8,7 +8,7 @@
 #include <thread>
 
 namespace omniocr {
-Pipeline::Pipeline(Json config, ModelFactory factory) : config_(std::move(config)) {
+Pipeline::Pipeline(Json config, ModelFactory factory) : config_(normalize_config(config)) {
     validate_config(config_);
     models_ = std::make_unique<ModelRegistry>(config_.at("models"), std::move(factory));
 }
