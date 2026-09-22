@@ -89,8 +89,8 @@ Image crop_region(const Image& image, const Box& box, const Json& route) {
     }
     return fn(image, box, route);
 }
-RecognitionResult decode_recognition(const Json& raw, const Json& route) {
-    auto name = route.value("adapter", std::string("text"));
+RecognitionResult decode_recognition(const Json& raw, const Json& route, const std::string& box_type) {
+    auto name = route.value("adapter", box_type=="table" ? std::string("table") : std::string("text"));
     RecognitionAdapter fn;
     { auto& r = registry(); std::lock_guard<std::mutex> lock(r.mutex);
       auto it = r.recognition.find(name);
