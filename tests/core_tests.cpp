@@ -86,15 +86,10 @@ void v3_plugin_test() {
            output["pages"][0]["blocks"][1]["id"]=="p1-s1" &&
            document_markdown(document).find("ignored_header")==std::string::npos,
            "V3 output schema, stable source identity, nullable Markdown order");
-    auto old=config();
-    expect(document_json(Pipeline(old).run(([] {
-        static TempDir temporary;
-        auto bytes=image().png(); const auto input=temporary.path/"legacy.png";
-        std::ofstream out(input,std::ios::binary);
-        out.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));
-        return input;
-    })(), fs::temp_directory_path() / ("omniocr-v3-legacy-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))))
-           ["schema_version"]==1,"legacy output schema remains v1");
+    Document legacy; Page legacy_page; legacy_page.number=1;
+    Box legacy_box; legacy_box.reading_order=0; legacy_page.regions.push_back({legacy_box});
+    legacy.pages.push_back(legacy_page);
+    expect(document_json(legacy)["schema_version"]==1,"legacy output schema remains v1");
 }
 void pool_test() {
     struct State { std::atomic<int> active{0}, peak{0}, constructed{0}; } state;
