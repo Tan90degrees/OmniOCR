@@ -93,6 +93,14 @@ std::vector<Box> parse_doclayout_v3(const Json& response, const Json& layout, in
                 b.bbox[3]=std::max(b.bbox[3],point[1]);
             }
         } else throw std::runtime_error("V3 region missing bbox and polygon");
+        if (!b.polygon.empty()) {
+            auto crop=b.bbox;
+            for (const auto& point : b.polygon) {
+                crop[0]=std::min(crop[0],point[0]); crop[1]=std::min(crop[1],point[1]);
+                crop[2]=std::max(crop[2],point[0]); crop[3]=std::max(crop[3],point[1]);
+            }
+            if (crop!=b.bbox) b.crop_bbox=crop;
+        }
         if (b.bbox[2]<=b.bbox[0] || b.bbox[3]<=b.bbox[1])
             throw std::runtime_error("empty or inverted V3 bbox");
         b.provenance={{"adapter",layout.value("adapter",layout.at("provider").get<std::string>())}};
