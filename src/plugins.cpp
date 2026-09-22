@@ -33,6 +33,10 @@ struct Registry {
             auto text = raw.at("text").get<std::string>();
             return RecognitionResult{table_to_html(text), text};
         });
+        recognition.emplace("vlm.ovisocr2", recognition.at("text"));
+        recognition.emplace("vlm.generic", recognition.at("text"));
+        recognition.emplace("ctc", recognition.at("text"));
+        recognition.emplace("table.otsl", recognition.at("table"));
         for (const auto& name : {"vllm", "http_json", "onnx", "acl", "mock"})
             backends.emplace(name, [](const Json& settings, size_t index) {
                 return make_legacy_model(settings, index);
