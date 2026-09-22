@@ -119,8 +119,9 @@ private:
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
 };
-Json document_json(const Document&);
+Json document_json(const Document&, int schema_version = 0);
 std::string document_markdown(const Document&);
 std::string table_to_html(const std::string&);
-void write_outputs(const Document&, const fs::path& directory, const std::string& format);
+void write_outputs(const Document&, const fs::path& directory, const std::string& format,
+                   int schema_version = 0);
 } // namespace omniocr
