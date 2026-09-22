@@ -1,16 +1,18 @@
 #include "omniocr/tensor.hpp"
+#include "http_client.hpp"
 #include <stdexcept>
 
 namespace omniocr {
 namespace {
 class HttpModel final : public Model {
     Json config_;
+    HttpClient client_;
 public:
-    explicit HttpModel(Json config) : config_(std::move(config)) {}
+    explicit HttpModel(Json config) : config_(std::move(config)), client_(config_) {}
     Json infer(const Image& image, const std::string& prompt) override {
         const auto data = "data:image/png;base64," + base64(image.png());
         if (config_.at("backend") == "http_json")
-            return post_json(config_, {{"image", data}, {"prompt", prompt}, {"width", image.width}, {"height", image.height}});
+            return client_.post({{"image", data}, {"prompt", prompt}, {"width", image.width}, {"height", image.height}});
         Json messages = Json::array();
         if (config_.contains("system_prompt")) messages.push_back({{"role", "system"}, {"content", config_.at("system_prompt")}});
         messages.push_back({{"role", "user"}, {"content", Json::array({
@@ -21,7 +23,7 @@ public:
         payload["model"] = config_.at("model"); payload["messages"] = messages; payload["stream"] = false;
         if (!payload.contains("temperature")) payload["temperature"] = 0;
         if (!payload.contains("max_tokens")) payload["max_tokens"] = 4096;
-        auto response = post_json(config_, payload);
+        auto response = client_.post(payload);
         const auto& choice = response.at("choices").at(0);
         if (choice.value("finish_reason", std::string{}) == "length") throw std::runtime_error("vLLM output truncated; raise max_tokens");
         return {{"text", choice.at("message").at("content").get<std::string>()}};

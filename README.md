@@ -117,6 +117,7 @@ ctest --test-dir build --output-on-failure
 | [批处理](docs/batch.md) | 任务清单、优先级、并发参数和退出码 |
 | [架构与 C++ 集成](docs/architecture.md) | 模块边界、调度、资源生命周期、扩展接口 |
 | [昇腾部署](docs/ascend.md) | vLLM-Ascend、OM 适配、310P3 记录及已知问题 |
+| [并发与性能](docs/performance.md) | 已实现优化、可复现压测、资源指标与后续路线 |
 | [测试与验证](docs/testing.md) | 测试命令、覆盖范围、实机与准确率验收边界 |
 | [x64 / ARM64 离线包](packaging/README.md) | 双架构构建、各自下载/验证及 SDK、转换器依赖 |
 

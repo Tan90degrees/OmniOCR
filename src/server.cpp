@@ -7,6 +7,9 @@
 #include <csignal>
 #include <cstdlib>
 #include <deque>
+#include <queue>
+#include <fcntl.h>
+#include <unistd.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -67,13 +70,6 @@ std::string extension(const std::string& input) {
         throw std::runtime_error("unsupported upload extension");
     return ext;
 }
-std::string read_file(const fs::path& file, size_t limit) {
-    if (!fs::is_regular_file(file) || fs::file_size(file) > limit)
-        throw std::runtime_error("result is missing or exceeds response limit");
-    std::ifstream in(file, std::ios::binary);
-    if (!in) throw std::runtime_error("cannot read result");
-    return std::string(std::istreambuf_iterator<char>(in), {});
-}
 MHD_Result respond(MHD_Connection* connection, unsigned status, const std::string& body,
                    const char* type = "application/json; charset=utf-8") {
     auto* response = MHD_create_response_from_buffer(body.size(), const_cast<char*>(body.data()),
@@ -82,6 +78,33 @@ MHD_Result respond(MHD_Connection* connection, unsigned status, const std::strin
     MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, type);
     MHD_add_response_header(response, "Cache-Control", "no-store");
     const auto result = MHD_queue_response(connection, status, response);
+    MHD_destroy_response(response);
+    return result;
+}
+// File-backed responses avoid reading and then copying the entire output for
+// each downloader. MHD owns the fd after successful response construction.
+MHD_Result respond_file(MHD_Connection* connection, const fs::path& path,
+                        uint64_t limit, const char* type) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) throw std::runtime_error("cannot open result");
+    struct stat info{};
+    if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0 ||
+        uint64_t(info.st_size) > limit) {
+        ::close(fd);
+        throw std::runtime_error("result is missing or exceeds response limit");
+    }
+    // Open nonblocking to reject special files without hanging, then provide
+    // the blocking regular descriptor required by libmicrohttpd.
+    const int flags = ::fcntl(fd, F_GETFL);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+        ::close(fd);
+        throw std::runtime_error("cannot prepare result file");
+    }
+    auto* response = MHD_create_response_from_fd64(uint64_t(info.st_size), fd);
+    if (!response) { ::close(fd); return MHD_NO; }
+    MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, type);
+    MHD_add_response_header(response, "Cache-Control", "no-store");
+    const auto result = MHD_queue_response(connection, MHD_HTTP_OK, response);
     MHD_destroy_response(response);
     return result;
 }
@@ -104,6 +127,12 @@ class ServerScheduler {
         std::map<int, Page> pages;
         std::string source;
     };
+    struct JobPriority {
+        bool operator()(const std::shared_ptr<Job>& a, const std::shared_ptr<Job>& b) const {
+            if (a->priority != b->priority) return a->priority < b->priority;
+            return a->sequence > b->sequence;
+        }
+    };
     struct Pending {
         std::shared_ptr<Job> job;
         int number;
@@ -117,6 +146,8 @@ class ServerScheduler {
     std::mutex mutex_;
     std::condition_variable changed_;
     std::map<std::string, std::shared_ptr<Job>> jobs_;
+    // Completed jobs remain queryable, but never participate in scheduling.
+    std::priority_queue<std::shared_ptr<Job>, std::vector<std::shared_ptr<Job>>, JobPriority> waiting_;
     std::deque<Pending> pages_;
     std::vector<std::thread> threads_;
     uint64_t sequence_ = 0;
@@ -162,19 +193,10 @@ class ServerScheduler {
             std::shared_ptr<Job> job;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                changed_.wait(lock, [&] {
-                    if (shutdown_) return true;
-                    for (const auto& [id, j] : jobs_) if (j->state == "queued") return true;
-                    return false;
-                });
+                changed_.wait(lock, [&] { return shutdown_ || !waiting_.empty(); });
                 if (shutdown_) return;
-                // Reevaluate waiting documents whenever a reader becomes available.
-                for (const auto& [id, candidate] : jobs_)
-                    if (candidate->state == "queued" &&
-                        (!job || candidate->priority > job->priority ||
-                         (candidate->priority == job->priority && candidate->sequence < job->sequence)))
-                        job = candidate;
-                if (!job) continue;
+                job = waiting_.top();
+                waiting_.pop();
                 job->state = "reading";
             }
             try {
@@ -314,6 +336,8 @@ public:
             if (jobs_.size() >= options_.max_jobs) throw std::runtime_error("job capacity reached");
             if (!jobs_.emplace(id, job).second) throw std::runtime_error("duplicate job ID");
             job->sequence = sequence_++;
+            try { waiting_.push(job); }
+            catch (...) { jobs_.erase(id); throw; }
         }
         changed_.notify_all();
     }
@@ -502,13 +526,13 @@ struct Http {
                 const char* format = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "format");
                 const std::string kind = format ? format : "json";
                 const auto file = scheduler.result_file(id, kind);
-                return respond(conn, MHD_HTTP_OK, read_file(file, 64 * 1024 * 1024),
+                return respond_file(conn, file, 64 * 1024 * 1024,
                     kind == "json" ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8");
             }
             const std::string assets = "/assets/";
             if (subpath.compare(0, assets.size(), assets) == 0) {
                 const auto file = scheduler.asset_file(id, subpath.substr(assets.size()));
-                return respond(conn, MHD_HTTP_OK, read_file(file, 128 * 1024 * 1024), "image/png");
+                return respond_file(conn, file, 128 * 1024 * 1024, "image/png");
             }
             return failure(conn, MHD_HTTP_NOT_FOUND, "not found");
         } catch (const std::out_of_range&) {

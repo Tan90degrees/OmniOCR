@@ -93,9 +93,17 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                 }
             }
         };
+        const size_t worker_count = std::min(size_t(box_workers), boxes.size());
+        // Batch/REST already execute on a bounded page worker. Avoid creating
+        // and immediately joining another OS thread for every serial page.
+        if (worker_count <= 1) {
+            work();
+            if (error) std::rethrow_exception(error);
+            return page;
+        }
         std::vector<std::thread> threads;
         // Join existing workers if thread creation throws, before any page storage is released.
-        try { for (size_t i = 0; i < std::min(size_t(box_workers), boxes.size()); ++i) threads.emplace_back(work); }
+        try { for (size_t i = 0; i < worker_count; ++i) threads.emplace_back(work); }
         catch (...) { stop = true; for (auto& t : threads) t.join(); throw; }
         for (auto& t : threads) t.join();
         if (error) std::rethrow_exception(error);
