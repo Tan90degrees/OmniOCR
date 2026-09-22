@@ -71,7 +71,7 @@ ctest --test-dir build --output-on-failure
 
 输出为 `out/demo/result.md`、`out/demo/result.json` 和按配置生成的 `assets/`。**demo 使用 Mock，输出包含 `[MOCK]`，用于验证流程，不执行真实 OCR。** 输出目录必须不存在或为空；重复运行请换新目录。
 
-要处理 PDF/Office，先按 [输入格式说明](docs/input-formats.md) 安装转换器。完整构建选项、离线依赖、CLI 用法和 REST 演示见 [快速上手](docs/getting-started.md)；ARM64 预构建包见 [离线包说明](packaging/README.md)。
+要处理 PDF/Office，先按 [输入格式说明](docs/input-formats.md) 安装转换器。完整构建选项、离线依赖、CLI 用法和 REST 演示见 [快速上手](docs/getting-started.md)；x64 / ARM64 原生构建与各自离线包见 [双架构离线包说明](packaging/README.md)。
 
 ## 接入真实模型
 
@@ -118,6 +118,6 @@ ctest --test-dir build --output-on-failure
 | [架构与 C++ 集成](docs/architecture.md) | 模块边界、调度、资源生命周期、扩展接口 |
 | [昇腾部署](docs/ascend.md) | vLLM-Ascend、OM 适配、310P3 记录及已知问题 |
 | [测试与验证](docs/testing.md) | 测试命令、覆盖范围、实机与准确率验收边界 |
-| [ARM64 离线包](packaging/README.md) | 下载、运行、SDK 与转换器依赖 |
+| [x64 / ARM64 离线包](packaging/README.md) | 双架构构建、各自下载/验证及 SDK、转换器依赖 |
 
 当前为 **0.1 基线**。已有自动化功能测试和用户提供的 310P3 真实 OCR 链路验证；全面准确率、性能与长期稳定性仍需目标环境验收。ACL 退出阶段 SIGSEGV 仍由 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 跟踪，结果生成不代表正常退出。验证依据与范围统一见 [测试文档](docs/testing.md) 和 [昇腾记录](docs/ascend.md)。
