@@ -2,7 +2,7 @@
 
 [项目首页](../README.md) · [文档目录](README.md)
 
-配置采用 JSON，`version` 为 1。模型路径、字典路径相对于配置文件；输入和输出路径相对于调用者工作目录。
+配置采用 JSON，支持兼容的 `version: 1` 和新增 `version: 2`（执行池、模型绑定、pipeline 分离）。v2 示例及 PP-DocLayoutV3 多边形/可选阅读顺序、外部 C ABI 插件见 [插件与 V3 专题](plugins.md)。其余字段说明中的旧式布局依然适用于 v1。模型路径、字典路径相对于配置文件；输入和输出路径相对于调用者工作目录。
 
 ## 顶层配置
 
@@ -19,7 +19,7 @@
 | `document.ofd_converter` | `omniocr-ofd-to-pdf` | OFD → PDF，见 [输入格式](input-formats.md) |
 | `document.csv_delimiter` | `,` | CSV 分隔符：逗号、分号、tab 或竖线 |
 | `document.max_csv_bytes` | 16777216 | CSV 解析前的输入字节上限 |
-| `layout.provider` | 必填 | `paddle`、`mineru`、`normalized` |
+| `layout.provider` | 必填 | `paddle`、`mineru`、`normalized` 或注册的 `paddle.doclayout_v3.http`/其他布局插件 |
 | `layout.model` | 必填 | 模型池 ID |
 | `layout.type_map` | 空 | 原始 label → 业务 BOX 类型 |
 | `layout.coordinates` | `pixel` | JSON 布局为 `pixel` 或 `normalized`（0–1） |
@@ -113,6 +113,8 @@ python tools/paddle_layout_server.py --model PP-DocLayoutV2 --device cpu --port 
 CTC 通常是文字行识别，不能把多行段落 BOX 直接缩成一行就当成完整 OCR。段落宜路由到 VLM，或为指定模型增加“文本行检测 → 行识别 → 汇总”的适配器。示例 `paddle-local.json` 用来展示混合后端路由，实际投入使用前要确认你的 BOX 与模型输入语义一致。
 
 不支持的 dtype、shape、词表或输出格式会明确失败，不回退到 mock。非 float32 辅助输出保留输出序号但不可作为识别输出解码。
+
+`output.schema_version` 与配置版本无关，可显式选择 `1`（矩形兼容、有损）或 `2`（轮廓、可选阅读顺序、来源和原始索引）；不设置时旧结果维持 v1、V3 轮廓结果自动采用 v2。具体字段和映射规则见 [插件与 V3](plugins.md)。
 
 ## JSON 结果
 
