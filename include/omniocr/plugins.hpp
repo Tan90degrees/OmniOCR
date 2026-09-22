@@ -23,7 +23,7 @@ bool has_recognition_adapter(const std::string& id);
 bool has_backend(const std::string& id);
 std::vector<Box> parse_layout(const Json&, const Json&, int width, int height);
 Image crop_region(const Image&, const Box&, const Json& route);
-RecognitionResult decode_recognition(const Json&, const Json& route);
+RecognitionResult decode_recognition(const Json&, const Json& route, const std::string& box_type);
 // Built-in model executors are registered here; individual model adapters do
 // not own or recreate model weights. ModelRegistry controls leasing.
 std::unique_ptr<Model> create_backend_model(const Json&, size_t index);
