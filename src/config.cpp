@@ -1,4 +1,5 @@
 #include "omniocr/core.hpp"
+#include "omniocr/plugins.hpp"
 #include <fstream>
 #include <cstdint>
 #include <limits>
@@ -37,7 +38,7 @@ void validate_config(const Json& c) {
         positive(m, "instances", 1, 128);
         positive(m, "acquire_timeout_ms", 60000, 3600000);
         const auto backend = m.at("backend").get<std::string>();
-        require(std::set<std::string>{"vllm", "http_json", "onnx", "acl", "mock"}.count(backend), "unknown backend " + backend);
+        require(has_backend(backend), "unknown backend plugin " + backend);
         if (backend == "vllm" || backend == "http_json") {
             const auto url = m.at("endpoint").get<std::string>();
             require(url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0, "endpoint must be an HTTP(S) URL");
@@ -70,18 +71,34 @@ void validate_config(const Json& c) {
     const auto threshold = layout.value("score_threshold", 0.0);
     require(threshold >= 0 && threshold <= 1, "layout score_threshold must be in [0,1]");
     require(models.contains(layout.at("model").get<std::string>()), "unknown layout model");
-    require(std::set<std::string>{"paddle", "mineru", "normalized"}.count(layout.at("provider").get<std::string>()), "unknown layout provider");
+    const auto provider = layout.at("provider").get<std::string>();
+    const auto adapter = layout.value("adapter", provider);
+    require(has_layout_adapter(adapter), "unknown layout adapter " + adapter);
     const auto coordinates = layout.value("coordinates", std::string("pixel"));
-    require(coordinates == "pixel" || coordinates == "normalized", "invalid coordinates");
+    require(coordinates == "pixel" || coordinates == "normalized" ||
+            (adapter == "paddle.doclayout_v3.http" && coordinates == "model_input"), "invalid coordinates");
     positive(layout, "max_boxes", 2000, 100000);
     if (layout.contains("image_size")) {
         auto size = layout.at("image_size").get<std::vector<int>>();
         require(size.size() == 2 && size[0] > 0 && size[1] > 0 && size[0] <= 8192 && size[1] <= 8192, "invalid layout image_size");
-        require(layout.at("provider") == "mineru", "layout image_size is only supported for MinerU normalized token coordinates");
+        require(provider == "mineru" || (adapter == "paddle.doclayout_v3.http" && coordinates == "model_input"),
+                "layout image_size requires MinerU or V3 model_input coordinates");
     }
     const auto& routes = c.at("routes");
     require(routes.is_object() && !routes.empty(), "routes must be a nonempty object");
     for (const auto& [type, route] : routes.items()) {
+        if (route.contains("cropper")) {
+            const auto cropper = route.at("cropper").get<std::string>();
+            require(has_crop_adapter(cropper), "unknown cropper " + cropper);
+            if (route.contains("crop_fallback"))
+                require(cropper == "polygon_mask_crop" &&
+                        route.at("crop_fallback") == "bbox_crop", "invalid crop_fallback");
+            if (route.contains("mask_background"))
+                positive(route, "mask_background", 255, 255);
+        }
+        if (route.contains("adapter"))
+            require(has_recognition_adapter(route.at("adapter").get<std::string>()),
+                    "unknown recognition adapter");
         auto action = route.value("action", std::string("recognize"));
         require(action == "recognize" || action == "skip" || action == "image", "invalid route action");
         if (action == "recognize") {
