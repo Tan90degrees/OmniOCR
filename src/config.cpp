@@ -2,6 +2,7 @@
 #include "omniocr/plugins.hpp"
 #include <fstream>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -88,6 +89,18 @@ void validate_config(const Json& c) {
         require(size.size() == 2 && size[0] > 0 && size[1] > 0 && size[0] <= 8192 && size[1] <= 8192, "invalid layout image_size");
         require(provider == "mineru" || (adapter == "paddle.doclayout_v3.http" && coordinates == "model_input"),
                 "layout image_size requires MinerU or V3 model_input coordinates");
+    }
+    if (layout.contains("transform")) {
+        require(adapter == "paddle.doclayout_v3.http" && coordinates == "model_input" &&
+                layout.contains("image_size"),
+                "explicit transform requires V3 model_input and image_size");
+        const auto& transform=layout.at("transform");
+        require(transform.is_object() && transform.contains("matrix") &&
+                transform.at("matrix").is_array() && transform.at("matrix").size()==9,
+                "transform.matrix must have 9 numbers");
+        for (const auto& value:transform.at("matrix"))
+            require(value.is_number() && std::isfinite(value.get<double>()),
+                    "transform.matrix contains invalid value");
     }
     const auto& routes = c.at("routes");
     require(routes.is_object() && !routes.empty(), "routes must be a nonempty object");
