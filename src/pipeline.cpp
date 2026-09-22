@@ -1,4 +1,5 @@
 #include "omniocr/core.hpp"
+#include "omniocr/plugins.hpp"
 #include <algorithm>
 #include <atomic>
 #include <fstream>
@@ -43,7 +44,10 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                     else throw std::runtime_error("no route for box type: " + region.box.type);
                     const auto action = route->value("action", std::string("recognize"));
                     if (action == "skip") continue;
-                    auto crop = image.crop(region.box.bbox);
+                    if (route->value("cropper", std::string("bbox_crop")) == "polygon_mask_crop" &&
+                        region.box.polygon.empty() && route->value("crop_fallback", std::string{}) == "bbox_crop")
+                        region.box.extensions["omniocr.crop_fallback"] = "bbox_crop";
+                    auto crop = crop_region(image, region.box, *route);
                     if (region.box.rotation) crop = crop.rotate(region.box.rotation);
                     if (action == "image" || route->value("save_crop", false)) {
                         fs::create_directories(output_dir / "assets");
@@ -62,12 +66,11 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                         for (const auto& candidate : candidates) {
                             try {
                                 auto result = models_->infer(candidate, crop, route->value("prompt", "Text Recognition:"));
-                                auto text = result.at("text").get<std::string>();
-                                // Decode inside the candidate boundary: malformed table tokens
-                                // must trigger the next model, not bypass route fallback.
-                                std::string decoded = region.box.type == "table" ? table_to_html(text) : text;
-                                region.raw_text = region.box.type == "table" ? text : "";
-                                region.text = std::move(decoded);
+                                // A candidate is successful only after task-specific adapter decoding.
+                                // Malformed model output is handled by the same candidate fallback.
+                                auto decoded = decode_recognition(result, *route, region.box.type);
+                                region.raw_text = std::move(decoded.raw_text);
+                                region.text = std::move(decoded.text);
                                 region.model = candidate;
                                 recognized = true;
                                 break;
