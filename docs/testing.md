@@ -14,6 +14,7 @@
 | [onnx_integration.py](../tests/onnx_integration.py) | ONNX Runtime 执行、张量形状、CTC 等适配 | 实际执行生成的小图，不评估 OCR 精度 |
 | [batch_integration.py](../tests/batch_integration.py) | 页调度、优先级、并发约束和任务隔离 | 模拟后端 |
 | [server_performance_integration.py](../tests/server_performance_integration.py) | 等待文档优先级/FIFO、大文件并发下载、断开后 FD 回收 | 模拟推理，验证调度与资源行为 |
+| [server_admission_integration.py](../tests/server_admission_integration.py) | 活跃任务/上传字节准入、断线归还、页面字节背压、超大页失败与计数核对 | 模拟推理，验证过载边界和配额恢复 |
 | [server_integration.py](../tests/server_integration.py) | 路径/上传、鉴权、状态、结果、并发与格式 | `--formats` 增加格式用例，模型使用模拟服务 |
 
 CI 定义见 [Linux / ONNX 工作流](../.github/workflows/ci.yml) 和 [ARM64 出包工作流](../.github/workflows/package-arm64.yml)。已发生的实机验证与环境信息统一记录在 [昇腾部署](ascend.md)。
@@ -31,6 +32,7 @@ python3 tests/input_formats_integration.py build/omniocr \
 python3 tests/batch_integration.py build/omniocr
 python3 tests/server_integration.py build/omniocr-server --formats
 python3 tests/server_performance_integration.py build/omniocr-server
+python3 tests/server_admission_integration.py build/omniocr-server
 ```
 
 `--external` 缺少依赖时会失败，不会将跳过记成通过。ONNX 测试单独使用启用了 ONNX 的二进制，例如：

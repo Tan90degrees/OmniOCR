@@ -29,6 +29,7 @@ jobs:
           python3 tests/external_plugin_integration.py build/omniocr build/omniocr-server
           python3 tests/server_integration.py build/omniocr-server --formats
           python3 tests/server_performance_integration.py build/omniocr-server
+          python3 tests/server_admission_integration.py build/omniocr-server
           for config in configs/*.json; do build/omniocr --config "$config" --validate; done
   onnx:
     runs-on: ubuntu-24.04

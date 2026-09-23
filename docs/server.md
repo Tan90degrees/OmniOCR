@@ -19,7 +19,10 @@ export OCR_API_KEY='replace-with-a-strong-secret'
   --allowed-input-root /data/documents \
   --host 127.0.0.1 --port 8080 \
   --page-workers 4 --document-workers 2 --max-queued-pages 2 \
-  --max-upload-bytes 67108864 --max-jobs 1000 --api-key-env OCR_API_KEY
+  --max-upload-bytes 67108864 --max-jobs 1000 \
+  --max-active-jobs 64 --max-inflight-upload-bytes 268435456 \
+  --max-queued-page-bytes 268435456 --http-connections 128 \
+  --api-key-env OCR_API_KEY
 ```
 
 上述配置路径应替换为实际已验证的模型配置文件。文件路径提交接口仅在显式设置 `--allowed-input-root` 时启用；未设置时只能上传二进制。默认只监听 127.0.0.1；监听 0.0.0.0 时必须设置 API key。HTTP 本身没有 TLS 或租户权限隔离：跨机器访问请通过可信 HTTPS 反向代理增加独立用户鉴权、限流与审计，不要把高权限的服务器目录开放给不可信客户端。
@@ -48,6 +51,8 @@ curl -X POST 'http://127.0.0.1:8080/v1/jobs/upload?extension=.pdf&priority=100' 
 
 请求体直接是**原始文件字节**，不是 JSON、base64 或 multipart 表单。查询参数 `extension` 必填，限定为[输入格式表](input-formats.md)中的受支持后缀；不使用客户端文件名构造任意路径。服务在接收 HTTP 数据块时将内容写入任务独立的暂存文件，而不是把整个文件放在请求内存。默认大小上限 64 MiB，可由 `--max-upload-bytes` 修改；超限返回 413，空内容返回 400。PDF 页数、像素限制沿用现有文档配置。
 
+并发准入：`--max-active-jobs` 默认 64，包括尚在上传/提交的预留请求、排队、转换、推理及写出中的任务；达到上限立即返回 **429**，带 `Retry-After: 1`。`--max-inflight-upload-bytes` 默认 256 MiB，按收到的原始字节计量，覆盖上传中及已提交但未结束的任务；超过配额返回 **429**。提交失败、连接断开和任务结束都会归还相应配额。`--max-jobs` 默认 1000，是进程生命周期累计接收上限，达到后返回 **503**；修改活跃任务上限不会延长累计上限。429 的客户端可按 `Retry-After` 延迟并加抖动重试；503 累计上限需运维调整容量/重启，客户端不要无限重试。
+
 两种提交成功均返回 **HTTP 202** 和：
 
 ```json
@@ -67,9 +72,13 @@ curl -H "Authorization: Bearer $OCR_API_KEY" \
 
 状态可能为 `queued`、`reading`、`processing`、`finalizing`、`succeeded` 或 `failed`。还返回 `priority`、`pages_queued`、`pages_completed`、`error` 和结果链接。结果只在 succeeded 后可用，未就绪返回 409、未知任务返回 404。结果 JSON/Markdown 与现有 CLI 保持同一格式。Markdown 的相对图片路径可映射到 `GET /v1/jobs/<job-id>/assets/<filename.png>`。 `GET /healthz` 仅检测 HTTP 服务存活，不代表 NPU 或远端 vLLM 健康。
 
+`GET /v1/metrics` 返回受相同 API key 保护的 JSON 快照：`active_jobs`、`reserved_jobs`、`queued_documents`、`queued_pages`、`queued_page_bytes`、`reserved_page_bytes`、`inflight_upload_bytes` 以及 `admitted_total`、`succeeded_total`、`failed_total`、`rejected_total`。已接受任务满足 `admitted_total = succeeded_total + failed_total + active_jobs`；预留请求另见 `reserved_jobs`。计数器只覆盖当前进程，重启后清零，不是 Prometheus 文本格式。429 和累计容量 503 均计入 `rejected_total`。
+
 ## 调度和部署边界
 
-`document-workers`（默认 2）控制同时进行文件读取、PDF 渲染、Office 转换的文档数，按待处理文件优先级领取任务；`max-queued-pages`（默认 2）约束就绪页面队列；`page-workers`（默认 4）是**所有请求共享**的页面推理并发上限，每页 BOX 串行，各模型仍受其独立 `instances` 限制。高优先级文件的**已就绪页面**优先取得空闲工作线程；不抢占已开始的推理或文档渲染，持续高优先级任务可能导致低优先级等待。每个文件按页号汇总结果，文件失败不会中断其他任务；断开 HTTP 连接不取消已提交任务。
+`document-workers`（默认 2）控制同时进行文件读取、PDF 渲染、Office 转换的文档数，按待处理文件优先级领取任务；`max-queued-pages`（默认 2）约束就绪页面队列；`--max-queued-page-bytes`（默认 256 MiB）同时约束队列中 RGB 图像与拷贝预留字节，超过单页限制的渲染页使所属任务失败。读取线程完成页面拷贝前会预留名额与字节；其他线程可继续调度。`page-workers`（默认 4）是**所有请求共享**的页面推理并发上限，每页 BOX 串行，各模型仍受其独立 `instances` 限制。高优先级文件的**已就绪页面**优先取得空闲工作线程；不抢占已开始的推理或文档渲染，持续高优先级任务可能导致低优先级等待。每个文件按页号汇总结果，文件失败不会中断其他任务；断开 HTTP 连接不取消已提交任务。
+
+页面字节限制针对等待队列及其预留拷贝，不包含正在转换的子进程、读取线程当前页、正在推理的页面、BOX 裁剪图像和结果缓冲。需结合 `document-workers`、`page-workers`、`document.max_pixels` 和容器内存预算设置，不能将该值直接当作进程 RSS 上限。HTTP 当前使用每连接一个服务线程，`--http-connections` 默认 128、可配 16–1024；提高该值会增加线程/FD 占用。应在活跃任务上限之外留出状态轮询和结果下载连接。
 
 本版单进程的任务状态仅在内存中，原始文件与成功输出保留在 data-dir 中；服务重启不会自动恢复旧任务，`max-jobs` 是进程生命周期内累计接受的任务上限。尚不支持删除/取消、运行中更改优先级、持久化队列、跨节点/多租户调度或幂等键。模型初始化在服务启动时进行。
 
