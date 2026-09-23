@@ -51,6 +51,7 @@ class AclEngine final : public TensorEngine {
     bool loaded_ = false;
     aclmdlDesc* desc_ = nullptr;
     std::unique_ptr<Dataset> inputs_, outputs_;
+    size_t fixed_batch_ = 0;
     void clear() noexcept {
         if (context_) aclrtSetCurrentContext(context_);
         outputs_.reset(); inputs_.reset();
@@ -60,6 +61,7 @@ class AclEngine final : public TensorEngine {
     }
 public:
     AclEngine(const Json& c, size_t index) {
+        const bool batching = c.value("batch_size", 1) > 1;
         const auto devices = c.value("device_ids", std::vector<int>{0});
         if (devices.empty()) throw std::runtime_error("empty ACL device_ids");
         const int device = devices[index % devices.size()];
@@ -78,6 +80,13 @@ public:
             for (size_t i = 0; i < aclmdlGetNumInputs(desc_); ++i) {
                 if (aclmdlGetInputDataType(desc_, i) != ACL_FLOAT) throw std::runtime_error("initial ACL codecs require float32 inputs");
                 aclmdlIODims dims; check(aclmdlGetInputDims(desc_, i, &dims), "aclmdlGetInputDims");
+                if (!dims.dimCount || dims.dims[0] <= 0) {
+                    if (batching) throw std::runtime_error("ACL batching requires a static leading batch dimension");
+                } else {
+                    if (batching && fixed_batch_ && fixed_batch_ != size_t(dims.dims[0]))
+                        throw std::runtime_error("ACL input batch dimensions differ");
+                    fixed_batch_ = size_t(dims.dims[0]);
+                }
                 for (size_t j = 0; j < dims.dimCount; ++j)
                     if (dims.dims[j] <= 0) throw std::runtime_error("dynamic OM inputs need a model-specific adapter");
                 inputs_->append(aclmdlGetInputSizeByIndex(desc_, i));
@@ -87,6 +96,7 @@ public:
         } catch (...) { clear(); throw; }
     }
     ~AclEngine() override { clear(); }
+    size_t fixed_batch_size() const override { return fixed_batch_; }
     std::vector<Tensor> run(const std::vector<Tensor>& tensors) override {
         // Leases can move between caller threads; explicitly restore the instance context.
         check(aclrtSetCurrentContext(context_), "aclrtSetCurrentContext");

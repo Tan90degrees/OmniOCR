@@ -7,8 +7,31 @@ namespace {
 class HttpModel final : public Model {
     Json config_;
     HttpClient client_;
+    std::unique_ptr<HttpClient> batch_client_;
 public:
-    explicit HttpModel(Json config) : config_(std::move(config)), client_(config_) {}
+    explicit HttpModel(Json config) : config_(std::move(config)), client_(config_) {
+        if (config_.contains("batch_endpoint")) {
+            auto settings = config_;
+            settings["endpoint"] = config_.at("batch_endpoint");
+            batch_client_ = std::make_unique<HttpClient>(std::move(settings));
+        }
+    }
+    bool supports_batch() const override { return config_.at("backend") == "http_json" && !!batch_client_; }
+    std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+        if (!supports_batch() || inputs.empty())
+            throw std::runtime_error("HTTP backend has no native batch endpoint");
+        Json requests = Json::array();
+        for (const auto& input : inputs) {
+            if (!input.image) throw std::runtime_error("null batch image");
+            requests.push_back({{"image", "data:image/png;base64," + base64(input.image->png())},
+                {"width", input.image->width}, {"height", input.image->height}, {"prompt", input.prompt}});
+        }
+        auto response = batch_client_->post({{"requests", std::move(requests)}});
+        const auto& results = response.at("results");
+        if (!results.is_array() || results.size() != inputs.size())
+            throw std::runtime_error("HTTP batch response count mismatch");
+        return results.get<std::vector<Json>>();
+    }
     Json infer(const Image& image, const std::string& prompt) override {
         const auto data = "data:image/png;base64," + base64(image.png());
         if (config_.at("backend") == "http_json")
@@ -34,6 +57,10 @@ class MockModel final : public Model {
 public:
     explicit MockModel(Json c) : config_(std::move(c)) {}
     Json infer(const Image&, const std::string&) override { return config_.at("response"); }
+    bool supports_batch() const override { return true; }
+    std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+        return std::vector<Json>(inputs.size(), config_.at("response"));
+    }
 };
 }
 std::unique_ptr<Model> make_legacy_model(const Json& config, size_t instance) {

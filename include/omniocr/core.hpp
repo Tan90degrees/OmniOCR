@@ -50,6 +50,11 @@ class Model {
 public:
     virtual ~Model() = default;
     virtual Json infer(const Image&, const std::string& prompt) = 0;
+    struct BatchInput { const Image* image; std::string prompt; };
+    // Only native batch-capable backends opt in. An ordinary plugin keeps its
+    // v1 single-request behavior and cannot silently serialize a batch.
+    virtual bool supports_batch() const { return false; }
+    virtual std::vector<Json> infer_batch(const std::vector<BatchInput>&);
 };
 using ModelFactory = std::function<std::unique_ptr<Model>(const Json&, size_t)>;
 std::unique_ptr<Model> make_model(const Json&, size_t instance);

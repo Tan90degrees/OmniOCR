@@ -21,6 +21,9 @@ class LocalModel final : public Model {
     std::unique_ptr<TensorEngine> engine_;
 public:
     LocalModel(Json config, std::unique_ptr<TensorEngine> engine) : config_(std::move(config)), engine_(std::move(engine)) {
+        const auto configured = size_t(config_.value("batch_size", 1));
+        if (configured > 1 && engine_->fixed_batch_size() && engine_->fixed_batch_size() != configured)
+            throw std::runtime_error("tensor model batch_size does not match its static input batch dimension");
         auto& decoder = config_["decoder"];
         if (decoder.value("type", "") == "ctc" && decoder.contains("dictionary")) {
             std::ifstream in(decoder.at("dictionary").get<std::string>());
@@ -37,6 +40,66 @@ public:
     }
     Json infer(const Image& image, const std::string&) override {
         return decode_tensors(engine_->run(preprocess(image, config_)), image, config_);
+    }
+    bool supports_batch() const override { return true; }
+    std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+        if (inputs.empty() || inputs.size() > size_t(config_.value("batch_size", 1)))
+            throw std::runtime_error("invalid tensor batch size");
+        const size_t physical = engine_->fixed_batch_size() ? engine_->fixed_batch_size() : inputs.size();
+        if (physical < inputs.size()) throw std::runtime_error("tensor model batch capacity exceeded");
+        std::vector<std::vector<Tensor>> prepared;
+        prepared.reserve(inputs.size());
+        for (const auto& item : inputs) {
+            if (!item.image) throw std::runtime_error("null batch image");
+            prepared.push_back(preprocess(*item.image, config_));
+        }
+        // Static OM/ONNX models execute at their exported batch size. Reuse
+        // the final prepared input when filling the aggregate tensor, without
+        // allocating another full preprocessing buffer for each padding item.
+        // Keep the first prepared sample available when it is also the padding
+        // source; moving it would leave a one-item tail with no input tensors.
+        auto combined = physical > 1 ? prepared[0] : std::move(prepared[0]);
+        for (auto& t : combined) {
+            if (t.shape.empty() || t.shape.front() != 1)
+                throw std::runtime_error("tensor batch input must have leading dimension 1");
+            t.data.reserve(t.data.size() * physical);
+            t.shape.front() = int64_t(physical);
+        }
+        for (size_t sample = 1; sample < physical; ++sample)
+            for (size_t i = 0; i < combined.size(); ++i) {
+                const auto& part = prepared[std::min(sample, prepared.size() - 1)][i];
+                if (part.name != combined[i].name || part.shape.size() != combined[i].shape.size() ||
+                    part.shape.empty() || part.shape.front() != 1 ||
+                    !std::equal(part.shape.begin() + 1, part.shape.end(), combined[i].shape.begin() + 1))
+                    throw std::runtime_error("tensor inputs cannot be grouped into a batch");
+                combined[i].data.insert(combined[i].data.end(), part.data.begin(), part.data.end());
+            }
+        const auto outputs = engine_->run(combined);
+        const auto& decoder = config_.at("decoder");
+        const size_t output_index = decoder.value("output_index", size_t(0));
+        if (output_index >= outputs.size()) throw std::runtime_error("decoder output index out of range");
+        const auto& output = outputs[output_index];
+        const auto type = decoder.at("type").get<std::string>();
+        if (output.shape.size() != 3 || output.shape[0] != int64_t(physical) ||
+            (type == "paddle_layout" && output.shape[2] != 6) ||
+            (type != "paddle_layout" && type != "ctc") ||
+            output.data.size() % physical)
+            throw std::runtime_error("batched tensor output must be [B,N,6] for layout or [B,T,C] for CTC");
+        const size_t stride = output.data.size() / physical;
+        std::vector<Json> results;
+        results.reserve(inputs.size());
+        for (size_t sample = 0; sample < inputs.size(); ++sample) {
+            std::vector<Tensor> one(outputs.size());
+            auto& t = one[output_index];
+            t.name = output.name;
+            t.shape = type == "paddle_layout" ?
+                std::vector<int64_t>{output.shape[1], output.shape[2]} :
+                std::vector<int64_t>{1, output.shape[1], output.shape[2]};
+            t.data.assign(output.data.begin() + sample * stride,
+                          output.data.begin() + (sample + 1) * stride);
+            results.push_back(decode_tensors(one, *inputs[sample].image, config_));
+        }
+        return results;
     }
 };
 }

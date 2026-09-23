@@ -80,6 +80,8 @@ curl -H "Authorization: Bearer $OCR_API_KEY" \
 
 页面字节限制针对等待队列及其预留拷贝，不包含正在转换的子进程、读取线程当前页、正在推理的页面、BOX 裁剪图像和结果缓冲。需结合 `document-workers`、`page-workers`、`document.max_pixels` 和容器内存预算设置，不能将该值直接当作进程 RSS 上限。HTTP 当前使用每连接一个服务线程，`--http-connections` 默认 128、可配 16–1024；提高该值会增加线程/FD 占用。应在活跃任务上限之外留出状态轮询和结果下载连接。
 
+可在[模型池配置](configuration.md#模型池)里为每个模型设置 `batch_size` 和 `max_batch_wait_ms`。相同模型 ID 的跨文件、跨页 BOX 可共同组成一次原生批量推理；`instances` 是同时运行的批次数上限。等待组批的页面仍计入 `page-workers` 并持有裁剪图像，不能只按已就绪页队列的字节上限估算进程内存。
+
 本版单进程的任务状态仅在内存中，原始文件与成功输出保留在 data-dir 中；服务重启不会自动恢复旧任务，`max-jobs` 是进程生命周期内累计接受的任务上限。尚不支持删除/取消、运行中更改优先级、持久化队列、跨节点/多租户调度或幂等键。模型初始化在服务启动时进行。
 
 ARM64 离线包在启用服务端构建的工作流通过后包含 `server.sh`，但不包含 CANN、NPU 驱动、模型权重或 vLLM 服务。310P3 + DocLayout + OvisOCR2 的服务器实机并发、长稳尚未验收，原先的 [ACL 退出 SIGSEGV Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 也仍未关闭。

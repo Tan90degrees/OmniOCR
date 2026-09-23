@@ -119,7 +119,7 @@ void v2_config_test() {
             {"layout_pool",{{"backend","mock"},{"response",{{"boxes",Json::array({
                 {{"type","text"},{"bbox",{0,0,1,1}}}
             })}}}}},
-            {"ocr_pool",{{"backend","mock"},{"max_inflight",1},
+            {"ocr_pool",{{"backend","mock"},{"max_inflight",1},{"batch_size",2},
                          {"response",{{"text","v2 recognition"}}}}}
         }},
         {"models",{
@@ -131,6 +131,7 @@ void v2_config_test() {
                      {"routes",{{"text",{{"model","text_model"},{"cropper","bbox_crop"}}}}}}}};
     auto runtime=normalize_config(c);
     expect(runtime["version"]==1 && runtime["models"].size()==2 &&
+           runtime["models"]["ocr_pool"]["batch_size"]==2 &&
            runtime["layout"]["model"]=="layout_pool" &&
            runtime["routes"]["text"]["model"]=="ocr_pool" &&
            runtime["routes"]["text"]["adapter"]=="vlm.ovisocr2",
@@ -189,6 +190,90 @@ void pool_test() {
     bool timed_out = false;
     try { single.infer("m", image(), ""); } catch (...) { timed_out = true; }
     release.set_value(); job.get(); expect(timed_out, "pool acquisition did not time out");
+}
+void dynamic_batch_test() {
+    struct State { std::mutex mutex; std::vector<std::vector<std::string>> groups; } state;
+    struct Batched : Model {
+        State& state;
+        explicit Batched(State& s) : state(s) {}
+        Json infer(const Image&, const std::string&) override {
+            throw std::runtime_error("batch path incorrectly used scalar infer");
+        }
+        bool supports_batch() const override { return true; }
+        std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+            std::vector<std::string> prompts;
+            std::vector<Json> results;
+            for (const auto& input : inputs) {
+                expect(input.image && input.image->width == 20, "batch image lifetime");
+                prompts.push_back(input.prompt);
+                results.push_back({{"text", input.prompt}});
+            }
+            { std::lock_guard<std::mutex> lock(state.mutex); state.groups.push_back(prompts); }
+            return results;
+        }
+    };
+    ModelRegistry shared({{"ocr", { {"instances", 1}, {"batch_size", 4},
+        {"max_batch_wait_ms", 250}, {"acquire_timeout_ms", 1000}}}},
+        [&](const Json&, size_t) { return std::make_unique<Batched>(state); });
+    std::promise<void> start;
+    auto go = start.get_future().share();
+    std::vector<std::future<Json>> jobs;
+    for (int i = 0; i < 4; ++i) jobs.push_back(std::async(std::launch::async, [&, i] {
+        go.wait();
+        auto img = image();
+        return shared.infer("ocr", img, "file-" + std::to_string(i));
+    }));
+    start.set_value();
+    for (int i = 0; i < 4; ++i)
+        expect(jobs[i].get().at("text") == "file-" + std::to_string(i),
+               "batch results reordered across files");
+    expect(state.groups.size() == 1 && state.groups[0].size() == 4,
+           "requests from different files were not coalesced");
+    auto img = image();
+    expect(shared.infer("ocr", img, "partial").at("text") == "partial",
+           "partial batch did not flush by deadline");
+    expect(state.groups.size() == 2 && state.groups[1].size() == 1,
+           "partial batch should be one native invocation");
+    struct Scalar : Model {
+        Json infer(const Image&, const std::string&) override { return Json::object(); }
+    };
+    throws([&] { ModelRegistry invalid({{"m", {{"batch_size", 2}}}},
+        [](const Json&, size_t) { return std::make_unique<Scalar>(); }); });
+    struct GateBatch : Model {
+        std::promise<void>& started;
+        std::shared_future<void> released;
+        std::atomic<bool> entered{false};
+        GateBatch(std::promise<void>& s, std::shared_future<void> r) : started(s), released(r) {}
+        Json infer(const Image&, const std::string&) override { throw std::runtime_error("scalar called"); }
+        bool supports_batch() const override { return true; }
+        std::vector<Json> infer_batch(const std::vector<BatchInput>& items) override {
+            if (!entered.exchange(true)) { started.set_value(); released.wait(); }
+            return std::vector<Json>(items.size(), {{"text", "recovered"}});
+        }
+    };
+    std::promise<void> started, release;
+    ModelRegistry blocked({{"m", {{"instances", 1}, {"batch_size", 2},
+        {"max_batch_wait_ms", 1}, {"acquire_timeout_ms", 30}}}},
+        [&](const Json&, size_t) {
+            return std::make_unique<GateBatch>(started, release.get_future().share());
+        });
+    auto running = std::async(std::launch::async, [&] {
+        auto owned = image();
+        return blocked.infer("m", owned, "first");
+    });
+    started.get_future().wait();
+    throws([&] { blocked.infer("m", img, "timed out while queued"); });
+    release.set_value();
+    expect(running.get()["text"] == "recovered" &&
+           blocked.infer("m", img, "after timeout")["text"] == "recovered",
+           "timed out request leaked into the next batch");
+    auto invalid_config = config();
+    invalid_config["models"]["shared"]["batch_size"] = 2;
+    invalid_config["models"]["shared"]["max_batch_wait_ms"] = 1.5;
+    throws([&] { validate_config(invalid_config); });
+    invalid_config["models"]["shared"]["max_batch_wait_ms"] = 500;
+    invalid_config["models"]["shared"]["acquire_timeout_ms"] = 200;
+    throws([&] { validate_config(invalid_config); });
 }
 void codec_test() {
     auto table = table_to_html("<fcel>A&B<lcel><nl><ucel><xcel><nl>");
@@ -396,7 +481,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); dynamic_batch_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

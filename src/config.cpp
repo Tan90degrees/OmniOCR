@@ -43,6 +43,25 @@ void validate_config(const Json& c) {
         require(!id.empty(), "empty model ID");
         positive(m, "instances", 1, 128);
         positive(m, "acquire_timeout_ms", 60000, 3600000);
+        positive(m, "batch_size", 1, 128);
+        positive(m, "max_pending_requests", 256, 100000);
+        const auto batch_size = m.value("batch_size", 1);
+        int wait = 5;
+        if (m.contains("max_batch_wait_ms")) {
+            const auto& value = m.at("max_batch_wait_ms");
+            require(value.is_number_integer() || value.is_number_unsigned(),
+                    "max_batch_wait_ms must be an integer");
+            if (value.is_number_unsigned())
+                require(value.get<uint64_t>() <= 1000, "max_batch_wait_ms out of range");
+            else require(value.get<int64_t>() >= 0 && value.get<int64_t>() <= 1000,
+                         "max_batch_wait_ms out of range");
+            wait = value.get<int>();
+        }
+        require(m.value("max_pending_requests", 256) >= batch_size,
+                "max_pending_requests must be at least batch_size");
+        if (batch_size > 1)
+            require(wait < m.value("acquire_timeout_ms", 60000),
+                    "max_batch_wait_ms must be less than acquire_timeout_ms");
         const auto backend = m.at("backend").get<std::string>();
         require(has_backend(backend), "unknown backend plugin " + backend);
         if (backend == "vllm" || backend == "http_json") {
@@ -52,6 +71,13 @@ void validate_config(const Json& c) {
             positive(m, "connect_timeout_seconds", 10, 3600);
             positive(m, "max_response_bytes", 16777216, 268435456);
             if (backend == "vllm") require(!m.at("model").get<std::string>().empty(), "missing served model name");
+            if (backend == "vllm") require(batch_size == 1,
+                "vLLM chat API has no native batch request; configure batching in vLLM serving instead");
+            if (backend == "http_json" && batch_size > 1) {
+                const auto endpoint = m.at("batch_endpoint").get<std::string>();
+                require(endpoint.rfind("http://", 0) == 0 || endpoint.rfind("https://", 0) == 0,
+                        "batch_endpoint must be an HTTP(S) URL");
+            }
         }
         if (backend == "onnx" || backend == "acl") {
             require(!m.at("path").get<std::string>().empty(), "missing model path");
