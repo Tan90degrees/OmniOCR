@@ -260,21 +260,38 @@ void dynamic_batch_test() {
            "partial batch should be one native invocation");
     // Each instance takes work from the same FIFO, even when batch profiles
     // differ. Verify native batch sizing, instance affinity and result routing.
+    std::promise<void> scalar_started, release_scalar, batch_started;
+    auto scalar_released = release_scalar.get_future().share();
+    auto scalar_seen = scalar_started.get_future();
+    auto batch_seen = batch_started.get_future();
+    std::atomic<bool> scalar_entered{false}, batch_entered{false};
     struct SlotBatch : Model {
         size_t slot;
         int configured_batch;
         std::atomic<int>& active;
         std::atomic<int>& peak;
-        SlotBatch(size_t i, int b, std::atomic<int>& a, std::atomic<int>& p)
-            : slot(i), configured_batch(b), active(a), peak(p) {}
+        std::promise<void>& scalar_started;
+        std::shared_future<void> scalar_released;
+        std::promise<void>& batch_started;
+        std::atomic<bool>& scalar_entered;
+        std::atomic<bool>& batch_entered;
+        SlotBatch(size_t i, int b, std::atomic<int>& a, std::atomic<int>& p,
+                  std::promise<void>& s, std::shared_future<void> r, std::promise<void>& t,
+                  std::atomic<bool>& se, std::atomic<bool>& be)
+            : slot(i), configured_batch(b), active(a), peak(p), scalar_started(s),
+              scalar_released(r), batch_started(t), scalar_entered(se), batch_entered(be) {}
         Json infer(const Image&, const std::string& prompt) override {
             expect(configured_batch == 1, "scalar slot did not receive its own batch configuration");
+            // Hold the first scalar call so a fast mock cannot drain the whole
+            // queue before the native batch worker gets scheduled on CI.
+            if (!scalar_entered.exchange(true)) { scalar_started.set_value(); scalar_released.wait(); }
             return {{"text", prompt}, {"slot", slot}};
         }
         bool supports_batch() const override { return true; }
         std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
             expect(configured_batch == 2 && inputs.size() <= 2,
                    "batch slot exceeded its configured batch size");
+            if (!batch_entered.exchange(true)) batch_started.set_value();
             const int current = ++active;
             int old = peak.load();
             while (old < current && !peak.compare_exchange_weak(old, current)) {}
@@ -290,13 +307,19 @@ void dynamic_batch_test() {
         {"batch_size", 2}, {"max_batch_wait_ms", 5},
         {"instance_overrides", Json::array({{{"batch_size", 1}}, {{"batch_size", 2}}})}}}},
         [&](const Json& settings, size_t slot) {
-            return std::make_unique<SlotBatch>(slot, settings.at("batch_size").get<int>(), active, peak);
+            return std::make_unique<SlotBatch>(slot, settings.at("batch_size").get<int>(), active, peak,
+                                               scalar_started, scalar_released, batch_started,
+                                               scalar_entered, batch_entered);
         });
     std::vector<std::future<Json>> routed;
     for (int i = 0; i < 16; ++i) routed.push_back(std::async(std::launch::async, [&, i] {
         auto img = image();
         return profiled.infer("ocr", img, "document-" + std::to_string(i));
     }));
+    const bool both_active = scalar_seen.wait_for(std::chrono::seconds(3)) == std::future_status::ready &&
+                             batch_seen.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    release_scalar.set_value();
+    expect(both_active, "global queue did not dispatch to both instances under contention");
     int batch_slot = 0, scalar_slot = 0;
     for (int i = 0; i < 16; ++i) {
         const auto value = routed[i].get();
