@@ -28,7 +28,7 @@
 
 组批配置和支持的 ONNX/ACL、HTTP、C ABI v2 后端见[配置参考](configuration.md#模型池)。该功能尚未在真实 NPU 上测吞吐或精度；前述基准报告的二进制 SHA256 均来自加入组批前的提交，不能当作组批性能结果。vLLM 自带连续批处理，本端单请求协议不拼接多张任务。
 
-配置 `instances: 1, max_concurrent_requests: 8` 可让同一个 vLLM endpoint 最多同时收到 8 个请求；REST 设置 `--box-workers 8` 或批处理设置 `options.box_workers: 8` 后，单页多 BOX 也能填充这些请求槽位。页面布局仍先执行，`document-workers` 和 `page-workers` 控制读取与在处理页面数，远端服务仍需具备相应容量。对 `batch_size>1` 的后端，该参数限制并行批次数；`max_concurrent_requests × batch_size` 只是理论最大有效样本数，实际取决于请求到达和尾批窗口。本地 ACL/ONNX 不能安全地由多个线程共享同一不可重入句柄，额外槽位会加载额外模型副本，需要实测设备内存和真实吞吐。
+配置 `instances: 1, max_concurrent_requests: 8` 可让同一个 vLLM endpoint 最多同时收到 8 个请求；在同一配置文件设置 `execution.box_workers: 8` 后，REST 和批处理的单页多 BOX 也能填充这些请求槽位，命令行/批处理清单可临时覆盖。页面布局仍先执行，`execution.document_workers` 和 `execution.page_workers` 控制读取与在处理页面数，远端服务仍需具备相应容量。对 `batch_size>1` 的后端，该参数限制并行批次数；`max_concurrent_requests × batch_size` 只是理论最大有效样本数，实际取决于请求到达和尾批窗口。本地 ACL/ONNX 不能安全地由多个线程共享同一不可重入句柄，额外槽位会加载额外模型副本，需要实测设备内存和真实吞吐。
 
 全局模型队列使用空闲实例领取队首 BOX，不预分配固定实例队列；配置每实例 batch/window 时，尺寸小的实例可能优先处理零散任务，尺寸大的实例在请求足够或窗口到期时执行。模型等待仍占用调用方 BOX 工作线程，吞吐上限还取决于 `box_workers`；下一步可对等待推理的 BOX 引入异步完成回调以降低线程占用。该调度改动尚无目标 NPU 的前后对照数据，不能以先前基准的倍率宣称本轮收益。
 

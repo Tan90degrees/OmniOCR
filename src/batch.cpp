@@ -14,8 +14,15 @@ namespace omniocr {
 std::vector<BatchResult> Pipeline::run_batch(const std::vector<BatchJob>& jobs,
                                              BatchOptions options) {
     if (jobs.empty()) return {};
+    const auto& execution = config_.value("execution", Json::object());
     if (options.page_workers == 0)
-        options.page_workers = config_.value("execution", Json::object()).value("workers", 4);
+        options.page_workers = execution.value("page_workers", execution.value("workers", 4));
+    if (options.box_workers == 0)
+        options.box_workers = execution.value("box_workers", 1);
+    if (options.max_active_documents == 0)
+        options.max_active_documents = execution.value("document_workers", 2);
+    if (options.max_queued_pages == 0)
+        options.max_queued_pages = execution.value("max_queued_pages", 2);
     if (options.page_workers < 1 || options.page_workers > 128 ||
         options.box_workers < 1 || options.box_workers > 128 ||
         options.max_active_documents < 1 || options.max_active_documents > 32 ||

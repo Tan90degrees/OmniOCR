@@ -115,6 +115,8 @@ void v3_plugin_test() {
 }
 void v2_config_test() {
     Json c={{"version",2},
+        {"server",{{"port",18080},{"data_dir","service-state"}}},
+        {"execution",{{"page_workers",2},{"box_workers",2},{"document_workers",2},{"max_queued_pages",4}}},
         {"executors",{
             {"layout_pool",{{"backend","mock"},{"response",{{"boxes",Json::array({
                 {{"type","text"},{"bbox",{0,0,1,1}}}
@@ -136,6 +138,7 @@ void v2_config_test() {
            runtime["models"]["ocr_pool"]["instance_overrides"].size()==2 &&
            runtime["models"]["ocr_pool"]["instances"]==1 &&
            runtime["models"]["ocr_pool"]["max_concurrent_requests"]==2 &&
+           runtime["execution"]["box_workers"]==2 && runtime["server"]["port"]==18080 &&
            runtime["layout"]["model"]=="layout_pool" &&
            runtime["routes"]["text"]["model"]=="ocr_pool" &&
            runtime["routes"]["text"]["adapter"]=="vlm.ovisocr2",
@@ -570,6 +573,43 @@ void batch_test() {
     });
     throws([&] { pipeline.run_batch(jobs, {129, 1, 1}); });
 }
+void scheduler_config_test() {
+    auto settings = config();
+    settings["execution"].update({{"page_workers", 2}, {"box_workers", 4},
+                                  {"document_workers", 3}, {"max_queued_pages", 8}});
+    settings["server"] = {{"host", "127.0.0.1"}, {"port", 18080},
+        {"data_dir", "service-state"}, {"allowed_input_root", "documents"},
+        {"max_active_jobs", 12}, {"max_queued_page_bytes", 1ULL << 32},
+        {"http_connections", 128}, {"connection_timeout_seconds", 30},
+        {"max_result_bytes", 64 * 1024 * 1024}, {"max_asset_bytes", 128 * 1024 * 1024}};
+    validate_config(settings);
+    TempDir temp;
+    const auto path = temp.path / "settings.json";
+    { std::ofstream out(path); out << settings.dump(); }
+    const auto loaded = load_config(path);
+    expect(loaded["server"]["data_dir"] == (temp.path / "service-state").string() &&
+           loaded["server"]["allowed_input_root"] == (temp.path / "documents").string(),
+           "service paths must resolve relative to the configuration file");
+    auto bad = settings;
+    bad["execution"]["box_workers"] = 0;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["execution"]["page_workers"] = 1.5;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["execution"]["box_worker"] = 8;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["server"]["http_connections"] = 15;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["server"]["max_inflight_upload_bytes"] = -1;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["server"]["max_active_jobs"] = 1.5;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["server"]["connection_timeout_seconds"] = 0;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["server"]["max_result_bytes"] = 0;
+    throws([&] { validate_config(bad); });
+    bad = settings; bad["server"]["max_jobs_typo"] = 1;
+    throws([&] { validate_config(bad); });
+}
 void image_process_test() {
     Image i{2, 1, {255,0,0, 0,0,255}};
     auto clipped = i.crop({-1e300, 0, 1e300, 1});
@@ -623,7 +663,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

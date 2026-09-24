@@ -17,7 +17,7 @@
 | [server_admission_integration.py](../tests/server_admission_integration.py) | 活跃任务/上传字节准入、断线归还、页面字节背压、超大页失败与计数核对 | 模拟推理，验证过载边界和配额恢复 |
 | [dynamic_batch_integration.py](../tests/dynamic_batch_integration.py) | 跨文件组批、单页多 BOX 填满原生批次、并行批次及结果对应 | 本地协议夹具，无远端模型权重 |
 | [backend_concurrency_integration.py](../tests/backend_concurrency_integration.py) | 单 VLM endpoint、单配置实例下，后端同时在途从 1 提高到 4 | 模拟 Chat Completions 服务，不代表真实 vLLM 能达到相同吞吐 |
-| [box_concurrency_integration.py](../tests/box_concurrency_integration.py) | 单页、单页面线程、单文件读取线程下四个 BOX 并发，REST 与批处理结果顺序 | 模拟 VLM 服务；验证全局池能填充模型并发槽位 |
+| [box_concurrency_integration.py](../tests/box_concurrency_integration.py) | 配置文件直接启动 REST、命令行覆盖、批处理继承 `execution`、服务结果大小配额、单页四 BOX 并发及结果顺序 | 模拟 VLM 服务；验证全局池能填充模型并发槽位 |
 | [server_integration.py](../tests/server_integration.py) | 路径/上传、鉴权、状态、结果、并发与格式 | `--formats` 增加格式用例，模型使用模拟服务 |
 
 CI 定义见 [Linux / ONNX 工作流](../.github/workflows/ci.yml) 和 [ARM64 出包工作流](../.github/workflows/package-arm64.yml)。已发生的实机验证与环境信息统一记录在 [昇腾部署](ascend.md)。

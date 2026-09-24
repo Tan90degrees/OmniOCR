@@ -2,13 +2,17 @@
 
 [项目首页](../README.md) · [文档目录](README.md)
 
-配置采用 JSON，支持兼容的 `version: 1` 和新增 `version: 2`（执行池、模型绑定、pipeline 分离）。v2 示例及 PP-DocLayoutV3 多边形/可选阅读顺序、外部 C ABI 插件见 [插件与 V3 专题](plugins.md)。其余字段说明中的旧式布局依然适用于 v1。模型路径、字典路径相对于配置文件；输入和输出路径相对于调用者工作目录。
+配置采用 JSON，支持兼容的 `version: 1` 和新增 `version: 2`（执行池、模型绑定、pipeline 分离）。v2 示例及 PP-DocLayoutV3 多边形/可选阅读顺序、外部 C ABI 插件见 [插件与 V3 专题](plugins.md)。其余字段说明中的旧式布局依然适用于 v1。模型、字典、`server.data_dir` 和 `server.allowed_input_root` 的相对路径以配置文件为基准；待处理文件和输出目录仍以调用者工作目录为基准。
 
 ## 顶层配置
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `execution.workers` | 4 | 每次文档处理的 BOX 线程上限，范围 1–128 |
+| `execution.workers` | 4 | 单文件 CLI 的 BOX 线程数；也是批处理/REST 的页面线程数回退值，范围 1–128 |
+| `execution.page_workers` | `execution.workers` | REST 和批处理共享的页面线程数，范围 1–128 |
+| `execution.box_workers` | 1 | REST 和批处理共享的 BOX 线程数，范围 1–128 |
+| `execution.document_workers` | 2 | 同时读取/转换的文档数，范围 1–32 |
+| `execution.max_queued_pages` | 2 | 待处理页面队列长度，范围 1–256 |
 | `execution.on_error` | `fail` | `fail` 或 `record`，仅控制 BOX 错误 |
 | `document.dpi` | 150 | PDF 渲染分辨率请求；像素上限会约束最终分辨率 |
 | `document.max_pixels` | 40000000 | 图片最大像素数；PDF 最大边长设为其平方根 |
@@ -26,6 +30,8 @@
 | `layout.image_size` | 不缩放 | MinerU 请求图像 `[宽,高]`，示例为 1036×1036 |
 | `layout.max_boxes` | 2000 | 单页 BOX 数上限 |
 | `layout.score_threshold` | 0 | 置信度过滤阈值 |
+
+服务专属的 `server` 配置可设置 `data_dir`、`allowed_input_root`、`host`、`port`、`api_key_env`、`max_upload_bytes`、`max_jobs`、`max_active_jobs`、`max_inflight_upload_bytes`、`max_queued_page_bytes`、`http_connections`、`connection_timeout_seconds`、`max_result_bytes` 和 `max_asset_bytes`。范围、启动样例和安全边界见[REST 服务](server.md#构建及启动)。批处理清单的 `options` 可覆盖 `execution` 中对应的调度设置；服务启动参数可覆盖配置文件。三种模式均复用模型池参数和 BOX 路由，无需改代码。未识别的 `execution`/`server` 键或越界值会在启动前报错。配置在进程启动时读取，修改工作线程数或模型实例数后须重启服务。
 
 `routes` 的键是经过 type_map 的类型名；`*` 是兜底。未命中且无兜底时按 on_error 处理。每个 route 的 `action` 默认为 `recognize`，须在 `model`（单个模型 ID）和 `models`（非空、不可重复的模型 ID 数组）中**二选一**；可设置 route 级 `prompt` 和 `save_crop`。`image` 只保存裁剪，`skip` 跳过识别但仍在 JSON 保留 BOX。
 

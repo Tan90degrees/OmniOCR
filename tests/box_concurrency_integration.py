@@ -88,12 +88,22 @@ def run(binary, server_binary):
                     sock.bind(('127.0.0.1', 0))
                     port = sock.getsockname()[1]
                 base = f'http://127.0.0.1:{port}'
+                config['execution'].update(page_workers=1, box_workers=1,
+                                           document_workers=1, max_queued_pages=2)
+                config['server'] = {'port': port,
+                    'data_dir': str(root / f'state-{box_workers}'),
+                    'allowed_input_root': str(root), 'max_active_jobs': 2,
+                    'max_jobs': 1,
+                    'max_result_bytes': 1,
+                    'max_queued_page_bytes': 16 * 1024 * 1024}
+                cfg.write_text(json.dumps(config))
                 with open(root / f'server-{box_workers}.log', 'w') as log:
-                    proc = subprocess.Popen([server_binary, '--config', str(cfg),
-                        '--data-dir', str(root / f'state-{box_workers}'),
-                        '--allowed-input-root', str(root), '--port', str(port),
-                        '--page-workers', '1', '--box-workers', str(box_workers),
-                        '--document-workers', '1'], stdout=log, stderr=log)
+                    # First boot uses config only; second overrides one setting
+                    # on the command line without changing the config file.
+                    command = [server_binary, '--config', str(cfg)]
+                    if box_workers > 1: command += ['--box-workers', str(box_workers),
+                                                   '--max-result-bytes', '65536']
+                    proc = subprocess.Popen(command, stdout=log, stderr=log)
                     try:
                         ready(base, proc)
                         code, response = request(base, '/v1/jobs', method='POST',
@@ -101,10 +111,15 @@ def run(binary, server_binary):
                         assert code == 202, (code, response)
                         assert finished(base, response['id'])['status'] == 'succeeded'
                         code, output = request(base, f"/v1/jobs/{response['id']}/result")
-                        assert code == 200, (code, output)
-                        check(output)
+                        if box_workers == 1:
+                            assert code == 400 and 'exceeds response limit' in output['error'], (code, output)
+                        else:
+                            assert code == 200, (code, output)
+                            check(output)
                         assert backend.calls == 4 and backend.peak == box_workers, (
                             box_workers, backend.calls, backend.peak)
+                        assert request(base, '/v1/jobs', method='POST',
+                            data=json.dumps({'path': str(sample)}).encode())[0] == 503
                     finally:
                         proc.terminate()
                         try: proc.wait(timeout=10)
@@ -114,8 +129,9 @@ def run(binary, server_binary):
             backend.active = backend.peak = backend.calls = 0
             backend.concurrent = True
             backend.gate = threading.Barrier(4, timeout=8)
-            manifest = {'options': {'page_workers': 1, 'box_workers': 4,
-                                    'max_active_documents': 1},
+            config['execution']['box_workers'] = 4
+            cfg.write_text(json.dumps(config))
+            manifest = {'options': {'page_workers': 1, 'max_active_documents': 1},
                         'jobs': [{'input': str(sample), 'output': str(root / 'batch-out')}]}
             jobs = root / 'jobs.json'
             jobs.write_text(json.dumps(manifest))

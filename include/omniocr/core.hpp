@@ -104,10 +104,10 @@ struct BatchJob {
     int priority = 0;
 };
 struct BatchOptions {
-    int page_workers = 0;          // 0: use execution.workers
-    int box_workers = 1;           // shared BOX threads; 1 keeps serial page processing
-    int max_active_documents = 2;  // concurrent document readers/converters
-    int max_queued_pages = 2;      // global queued images; bounds memory
+    int page_workers = 0;          // 0: use execution.page_workers (or workers)
+    int box_workers = 0;           // 0: use execution.box_workers
+    int max_active_documents = 0;  // 0: use execution.document_workers
+    int max_queued_pages = 0;      // 0: use execution.max_queued_pages
 };
 struct BatchResult {
     Document document;

@@ -29,6 +29,17 @@ void positive(const Json& j, const char* key, int fallback, int max) {
                 std::string(key) + " out of range");
     }
 }
+void bounded(const Json& j, const char* key, uint64_t low, uint64_t high) {
+    if (!j.contains(key)) return;
+    const auto& value = j.at(key);
+    require(value.is_number_integer() || value.is_number_unsigned(),
+            std::string(key) + " must be an integer");
+    if (value.is_number_unsigned())
+        require(value.get<uint64_t>() >= low && value.get<uint64_t>() <= high,
+                std::string(key) + " out of range");
+    else require(value.get<int64_t>() >= 0 && uint64_t(value.get<int64_t>()) >= low &&
+                 uint64_t(value.get<int64_t>()) <= high, std::string(key) + " out of range");
+}
 }
 void validate_config(const Json& c) {
     if (c.is_object() && c.contains("version") && c.at("version") == 2) {
@@ -201,8 +212,40 @@ void validate_config(const Json& c) {
                 "output.schema_version must be integer 1 or 2");
     }
     const auto exec = c.value("execution", Json::object());
+    require(exec.is_object(), "execution must be an object");
+    for (const auto& [key, value] : exec.items())
+        require(std::set<std::string>{"workers", "page_workers", "box_workers", "document_workers",
+                                      "max_queued_pages", "on_error"}.count(key), "unknown execution setting: " + key);
     positive(exec, "workers", 4, 128);
+    positive(exec, "page_workers", exec.value("workers", 4), 128);
+    positive(exec, "box_workers", 1, 128);
+    positive(exec, "document_workers", 2, 32);
+    positive(exec, "max_queued_pages", 2, 256);
     require(exec.value("on_error", "fail") == "fail" || exec.value("on_error", "fail") == "record", "invalid on_error");
+    const auto server = c.value("server", Json::object());
+    require(server.is_object(), "server must be an object");
+    for (const auto& [key, value] : server.items())
+        require(std::set<std::string>{"data_dir", "allowed_input_root", "host", "port", "api_key_env",
+                                      "max_upload_bytes", "max_jobs", "max_active_jobs",
+                                      "max_inflight_upload_bytes", "max_queued_page_bytes", "http_connections",
+                                      "connection_timeout_seconds", "max_result_bytes", "max_asset_bytes"}.count(key),
+                "unknown server setting: " + key);
+    for (const auto* key : {"data_dir", "allowed_input_root", "api_key_env"})
+        if (server.contains(key)) require(server.at(key).is_string() &&
+            !server.at(key).get<std::string>().empty(), std::string("server.") + key + " must be a nonempty string");
+    if (server.contains("host")) require(server.at("host").is_string() &&
+        (server.at("host") == "127.0.0.1" || server.at("host") == "0.0.0.0"),
+        "server.host must be 127.0.0.1 or 0.0.0.0");
+    bounded(server, "port", 1, 65535);
+    bounded(server, "max_upload_bytes", 1, 512ULL * 1024 * 1024);
+    bounded(server, "max_jobs", 1, 100000);
+    bounded(server, "max_active_jobs", 1, 100000);
+    bounded(server, "max_inflight_upload_bytes", 1, 1ULL << 40);
+    bounded(server, "max_queued_page_bytes", 1, 1ULL << 40);
+    bounded(server, "http_connections", 16, 1024);
+    bounded(server, "connection_timeout_seconds", 1, 3600);
+    bounded(server, "max_result_bytes", 1, 1ULL << 40);
+    bounded(server, "max_asset_bytes", 1, 1ULL << 40);
     const auto doc = c.value("document", Json::object());
     positive(doc, "dpi", 150, 1200);
     positive(doc, "max_pages", 1000, 100000);
@@ -231,6 +274,10 @@ Json load_config(const fs::path& path) {
     }
     c = normalize_config(c);
     validate_config(c);
+    if (c.contains("server"))
+        for (const char* key : {"data_dir", "allowed_input_root"})
+            if (c["server"].contains(key)) c["server"][key] =
+                fs::absolute(path.parent_path() / c["server"][key].get<std::string>()).string();
     // Model assets are resolved relative to the config, never the process cwd.
     for (auto& m : c["models"]) {
         if (m.contains("path")) m["path"] = fs::absolute(path.parent_path() / m["path"].get<std::string>()).string();

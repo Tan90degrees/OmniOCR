@@ -38,8 +38,9 @@ struct Options {
     size_t max_upload_bytes = 64 * 1024 * 1024, max_jobs = 1000;
     size_t max_active_jobs = 64, max_inflight_upload_bytes = 256 * 1024 * 1024;
     size_t max_queued_page_bytes = 256 * 1024 * 1024;
+    size_t max_result_bytes = 64 * 1024 * 1024, max_asset_bytes = 128 * 1024 * 1024;
     int page_workers = 4, box_workers = 1, document_workers = 2, max_queued_pages = 2;
-    unsigned http_connections = 128;
+    unsigned http_connections = 128, connection_timeout_seconds = 30;
 };
 bool below(const fs::path& root, const fs::path& path) {
     auto a = root.begin(), b = path.begin();
@@ -663,13 +664,13 @@ struct Http {
                 const char* format = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "format");
                 const std::string kind = format ? format : "json";
                 const auto file = scheduler.result_file(id, kind);
-                return respond_file(conn, file, 64 * 1024 * 1024,
+                return respond_file(conn, file, scheduler.options().max_result_bytes,
                     kind == "json" ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8");
             }
             const std::string assets = "/assets/";
             if (subpath.compare(0, assets.size(), assets) == 0) {
                 const auto file = scheduler.asset_file(id, subpath.substr(assets.size()));
-                return respond_file(conn, file, 128 * 1024 * 1024, "image/png");
+                return respond_file(conn, file, scheduler.options().max_asset_bytes, "image/png");
             }
             return failure(conn, MHD_HTTP_NOT_FOUND, "not found");
         } catch (const std::out_of_range&) {
@@ -689,12 +690,13 @@ int main(int argc, char** argv) {
     try {
         Options options;
         if (argc == 2 && std::string(argv[1]) == "--help") {
-            std::cout << "omniocr-server --config CONFIG --data-dir DIR [--allowed-input-root DIR]"
+            std::cout << "omniocr-server --config CONFIG [--data-dir DIR] [--allowed-input-root DIR]"
                          " [--host 127.0.0.1] [--port 8080] [--page-workers N] [--box-workers N]"
                          " [--document-workers N] [--max-queued-pages N]"
                          " [--max-upload-bytes N] [--max-jobs N] [--max-active-jobs N]"
                          " [--max-inflight-upload-bytes N] [--max-queued-page-bytes N]"
-                         " [--http-connections N]"
+                         " [--max-result-bytes N] [--max-asset-bytes N]"
+                         " [--http-connections N] [--connection-timeout-seconds N]"
                          " [--api-key-env NAME]\n";
             return 0;
         }
@@ -708,14 +710,16 @@ int main(int argc, char** argv) {
                 key != "--max-upload-bytes" && key != "--max-jobs" &&
                 key != "--max-active-jobs" && key != "--max-inflight-upload-bytes" &&
                 key != "--max-queued-page-bytes" &&
+                key != "--max-result-bytes" && key != "--max-asset-bytes" &&
                 key != "--http-connections" &&
+                key != "--connection-timeout-seconds" &&
                 key != "--api-key-env")
                 throw std::runtime_error("unknown option: " + key);
             if (++i >= argc || args.count(key)) throw std::runtime_error("duplicate or missing option: " + key);
             args[key] = argv[i];
         }
-        if (!args.count("--config") || !args.count("--data-dir"))
-            throw std::runtime_error("--config and --data-dir are required");
+        if (!args.count("--config"))
+            throw std::runtime_error("--config is required");
         auto parse = [&](const char* key, int fallback, int low, int high) {
             if (!args.count(key)) return fallback;
             const auto& value = args.at(key);
@@ -726,21 +730,30 @@ int main(int argc, char** argv) {
             return int(n);
         };
         options.config = fs::canonical(args.at("--config"));
-        options.data_dir = fs::absolute(args.at("--data-dir")).lexically_normal();
+        const auto config = load_config(options.config);
+        const auto server = config.value("server", Json::object());
+        const auto execution = config.value("execution", Json::object());
+        if (args.count("--data-dir")) options.data_dir = fs::absolute(args.at("--data-dir")).lexically_normal();
+        else if (server.contains("data_dir")) options.data_dir = server.at("data_dir").get<std::string>();
+        else throw std::runtime_error("--data-dir or server.data_dir is required");
         if (args.count("--allowed-input-root"))
             options.allowed_root = fs::canonical(args.at("--allowed-input-root"));
-        options.host = args.count("--host") ? args.at("--host") : options.host;
+        else if (server.contains("allowed_input_root"))
+            options.allowed_root = fs::canonical(server.at("allowed_input_root").get<std::string>());
+        options.host = args.count("--host") ? args.at("--host") : server.value("host", options.host);
         if (options.host != "127.0.0.1" && options.host != "0.0.0.0")
             throw std::runtime_error("--host supports 127.0.0.1 or 0.0.0.0");
-        options.port = static_cast<unsigned short>(parse("--port", 8080, 1, 65535));
-        options.page_workers = parse("--page-workers", 4, 1, 128);
-        options.box_workers = parse("--box-workers", 1, 1, 128);
-        options.document_workers = parse("--document-workers", 2, 1, 32);
-        options.max_queued_pages = parse("--max-queued-pages", 2, 1, 256);
-        options.max_jobs = size_t(parse("--max-jobs", 1000, 1, 100000));
-        options.max_active_jobs = size_t(parse("--max-active-jobs", 64, 1, 100000));
-        options.http_connections = unsigned(parse("--http-connections", 128, 16, 1024));
-        options.max_upload_bytes = size_t(parse("--max-upload-bytes", 64*1024*1024, 1, 512*1024*1024));
+        options.port = static_cast<unsigned short>(parse("--port", server.value("port", 8080), 1, 65535));
+        options.page_workers = parse("--page-workers", execution.value("page_workers", execution.value("workers", 4)), 1, 128);
+        options.box_workers = parse("--box-workers", execution.value("box_workers", 1), 1, 128);
+        options.document_workers = parse("--document-workers", execution.value("document_workers", 2), 1, 32);
+        options.max_queued_pages = parse("--max-queued-pages", execution.value("max_queued_pages", 2), 1, 256);
+        options.max_jobs = size_t(parse("--max-jobs", server.value("max_jobs", 1000), 1, 100000));
+        options.max_active_jobs = size_t(parse("--max-active-jobs", server.value("max_active_jobs", 64), 1, 100000));
+        options.http_connections = unsigned(parse("--http-connections", server.value("http_connections", 128), 16, 1024));
+        options.connection_timeout_seconds = unsigned(parse("--connection-timeout-seconds",
+            server.value("connection_timeout_seconds", 30), 1, 3600));
+        options.max_upload_bytes = size_t(parse("--max-upload-bytes", server.value("max_upload_bytes", 64*1024*1024), 1, 512*1024*1024));
         auto parse_bytes = [&](const char* key, size_t fallback) {
             if (!args.count(key)) return fallback;
             size_t consumed = 0;
@@ -752,18 +765,23 @@ int main(int argc, char** argv) {
             return size_t(n);
         };
         options.max_inflight_upload_bytes = parse_bytes(
-            "--max-inflight-upload-bytes", options.max_inflight_upload_bytes);
+            "--max-inflight-upload-bytes", server.value("max_inflight_upload_bytes", options.max_inflight_upload_bytes));
         options.max_queued_page_bytes = parse_bytes(
-            "--max-queued-page-bytes", options.max_queued_page_bytes);
-        if (args.count("--api-key-env")) {
-            const char* value = std::getenv(args.at("--api-key-env").c_str());
+            "--max-queued-page-bytes", server.value("max_queued_page_bytes", options.max_queued_page_bytes));
+        options.max_result_bytes = parse_bytes(
+            "--max-result-bytes", server.value("max_result_bytes", options.max_result_bytes));
+        options.max_asset_bytes = parse_bytes(
+            "--max-asset-bytes", server.value("max_asset_bytes", options.max_asset_bytes));
+        const auto api_key_env = args.count("--api-key-env") ? args.at("--api-key-env") :
+            server.value("api_key_env", std::string{});
+        if (!api_key_env.empty()) {
+            const char* value = std::getenv(api_key_env.c_str());
             if (!value || !*value) throw std::runtime_error("API key environment variable is missing or empty");
             options.api_key = value;
         }
         if (options.host == "0.0.0.0" && options.api_key.empty())
-            throw std::runtime_error("non-loopback binding requires --api-key-env");
+            throw std::runtime_error("non-loopback binding requires server.api_key_env or --api-key-env");
         fs::create_directories(options.data_dir);
-        const auto config = load_config(options.config);
         ServerScheduler scheduler(config, options);
         Http http{scheduler};
         const auto flags = MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_THREAD_PER_CONNECTION;
@@ -774,7 +792,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("invalid IPv4 bind address");
         struct MHD_Daemon* daemon = MHD_start_daemon(flags, options.port, nullptr, nullptr,
             &Http::handler, &http, MHD_OPTION_SOCK_ADDR, &bind_address,
-            MHD_OPTION_CONNECTION_TIMEOUT, 30u,
+            MHD_OPTION_CONNECTION_TIMEOUT, options.connection_timeout_seconds,
             MHD_OPTION_CONNECTION_LIMIT, options.http_connections,
             MHD_OPTION_NOTIFY_COMPLETED, &Http::completed, &http, MHD_OPTION_END);
         if (!daemon) throw std::runtime_error("could not start HTTP server");
