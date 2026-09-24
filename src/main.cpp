@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
                 const auto& values = manifest.at("options");
                 if (!values.is_object()) throw std::runtime_error("batch options must be an object");
                 options.page_workers = integer(values, "page_workers", options.page_workers, 1, 128);
+                options.box_workers = integer(values, "box_workers", options.box_workers, 1, 128);
                 options.max_active_documents = integer(values, "max_active_documents",
                                                        options.max_active_documents, 1, 32);
                 options.max_queued_pages = integer(values, "max_queued_pages",

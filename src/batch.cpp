@@ -1,4 +1,5 @@
 #include "omniocr/core.hpp"
+#include "box_pool.hpp"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -16,6 +17,7 @@ std::vector<BatchResult> Pipeline::run_batch(const std::vector<BatchJob>& jobs,
     if (options.page_workers == 0)
         options.page_workers = config_.value("execution", Json::object()).value("workers", 4);
     if (options.page_workers < 1 || options.page_workers > 128 ||
+        options.box_workers < 1 || options.box_workers > 128 ||
         options.max_active_documents < 1 || options.max_active_documents > 32 ||
         options.max_queued_pages < 1 || options.max_queued_pages > 256)
         throw std::runtime_error("invalid batch worker/queue limits");
@@ -61,6 +63,7 @@ std::vector<BatchResult> Pipeline::run_batch(const std::vector<BatchJob>& jobs,
     const size_t reader_count = std::min(jobs.size(), size_t(options.max_active_documents));
     size_t readers_remaining = reader_count;
     bool abort = false;
+    BoxTaskPool box_pool(options.box_workers > 1 ? options.box_workers : 0);
 
     auto fail = [&](size_t id, const std::string& reason) {
         std::lock_guard<std::mutex> guard(mutex);
@@ -129,9 +132,12 @@ std::vector<BatchResult> Pipeline::run_batch(const std::vector<BatchJob>& jobs,
                 if (!results[task.job].error.empty()) continue;
             }
             try {
-                // One BOX at a time within each page: page_workers is a GLOBAL
-                // inference concurrency bound, not page_workers * execution.workers.
-                Page page = process_page(task.page, task.image, outputs[task.job], 1);
+                Page page = options.box_workers > 1 ?
+                    process_page(task.page, task.image, outputs[task.job], options.box_workers,
+                        [&box_pool](std::function<void()> work) {
+                            return box_pool.submit(std::move(work));
+                        }) :
+                    process_page(task.page, task.image, outputs[task.job], 1);
                 std::lock_guard<std::mutex> guard(mutex);
                 if (results[task.job].error.empty() &&
                     !finished[task.job].emplace(task.page, std::move(page)).second)

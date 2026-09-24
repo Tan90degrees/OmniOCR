@@ -37,7 +37,7 @@ class Handler(BaseHTTPRequestHandler):
             self.server.active += 1
             self.server.peak = max(self.server.peak, self.server.active)
         try:
-            if sequence <= 2:
+            if sequence <= 2 and self.server.gate:
                 self.server.gate.wait(timeout=8)
             time.sleep(.02)
             body = json.dumps({'results': [{'text': str(pixel)} for pixel in pixels]}).encode()
@@ -110,9 +110,42 @@ def run(binary):
                     try: proc.wait(timeout=10)
                     except subprocess.TimeoutExpired: proc.kill(); proc.wait()
                     assert proc.returncode == 0, proc.returncode
+            # One page can now form a full native batch from its own BOXes.
+            with backend.lock:
+                backend.batches.clear()
+                backend.peak = 0
+            backend.gate = None
+            config['models']['ocr']['max_concurrent_requests'] = 1
+            config['models']['layout']['response']['boxes'] = [
+                {'type': 'text', 'bbox': [0, i/4, 1, (i+1)/4], 'order': i}
+                for i in range(4)]
+            (root/'config.json').write_text(json.dumps(config))
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+            base = f'http://127.0.0.1:{port}'
+            with open(root/'single-page.log', 'w') as log:
+                proc = subprocess.Popen([binary, '--config', str(root/'config.json'),
+                    '--data-dir', str(root/'single-page-state'), '--allowed-input-root', str(root),
+                    '--port', str(port), '--page-workers', '1', '--box-workers', '4',
+                    '--document-workers', '1'], stdout=log, stderr=log)
+                try:
+                    ready(base, proc)
+                    code, response = request(base, '/v1/jobs', method='POST',
+                        data=json.dumps({'path': str(root/'3.ppm')}).encode())
+                    assert code == 202, (code, response)
+                    assert finished(base, response['id'])['status'] == 'succeeded'
+                    code, output = request(base, f"/v1/jobs/{response['id']}/result")
+                    assert code == 200 and [b['text'] for b in output['pages'][0]['blocks']] == [
+                        '13', '13', '113', '113'], (code, output)
+                    assert len(backend.batches) == 1 and len(backend.batches[0]) == 4, backend.batches
+                finally:
+                    proc.terminate()
+                    try: proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+                    assert proc.returncode == 0, proc.returncode
     finally:
         backend.shutdown(); backend.server_close(); thread.join()
-    print('PASS: per-model HTTP batching coalesces BOX types across files and preserves results')
+    print('PASS: cross-file and single-page BOX batches preserve ordered results')
 
 
 if __name__ == '__main__':

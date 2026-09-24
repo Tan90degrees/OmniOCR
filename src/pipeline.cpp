@@ -13,7 +13,7 @@ Pipeline::Pipeline(Json config, ModelFactory factory) : config_(normalize_config
     models_ = std::make_unique<ModelRegistry>(config_.at("models"), std::move(factory));
 }
 Page Pipeline::process_page(int number, const Image& image, const fs::path& output_dir,
-                            int box_workers) {
+                            int box_workers, const BoxSubmit& submit) {
     const auto execution = config_.value("execution", Json::object());
     const auto& layout = config_.at("layout");
     const auto& routes = config_.at("routes");
@@ -98,6 +98,29 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         // and immediately joining another OS thread for every serial page.
         if (worker_count <= 1) {
             work();
+            if (error) std::rethrow_exception(error);
+            return page;
+        }
+        if (submit) {
+            std::vector<std::future<void>> tasks;
+            tasks.reserve(worker_count);
+            try {
+                for (size_t i = 0; i < worker_count; ++i) tasks.push_back(submit(work));
+            } catch (...) {
+                stop = true;
+                for (auto& task : tasks) task.wait();
+                throw;
+            }
+            // Every task must finish before returning: it holds references to
+            // the input image, page, and this call's local error state.
+            for (auto& task : tasks) {
+                try { task.get(); }
+                catch (...) {
+                    stop = true;
+                    std::lock_guard<std::mutex> lock(error_mutex);
+                    if (!error) error = std::current_exception();
+                }
+            }
             if (error) std::rethrow_exception(error);
             return page;
         }

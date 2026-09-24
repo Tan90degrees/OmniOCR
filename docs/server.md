@@ -18,7 +18,7 @@ export OCR_API_KEY='replace-with-a-strong-secret'
   --data-dir /var/lib/omniocr \
   --allowed-input-root /data/documents \
   --host 127.0.0.1 --port 8080 \
-  --page-workers 4 --document-workers 2 --max-queued-pages 2 \
+  --page-workers 4 --box-workers 8 --document-workers 4 --max-queued-pages 8 \
   --max-upload-bytes 67108864 --max-jobs 1000 \
   --max-active-jobs 64 --max-inflight-upload-bytes 268435456 \
   --max-queued-page-bytes 268435456 --http-connections 128 \
@@ -76,11 +76,11 @@ curl -H "Authorization: Bearer $OCR_API_KEY" \
 
 ## 调度和部署边界
 
-`document-workers`（默认 2）控制同时进行文件读取、PDF 渲染、Office 转换的文档数，按待处理文件优先级领取任务；`max-queued-pages`（默认 2）约束就绪页面队列；`--max-queued-page-bytes`（默认 256 MiB）同时约束队列中 RGB 图像与拷贝预留字节，超过单页限制的渲染页使所属任务失败。读取线程完成页面拷贝前会预留名额与字节；其他线程可继续调度。`page-workers`（默认 4）是**所有请求共享**的页面推理并发上限，每页 BOX 串行，各模型还受自己的 `max_concurrent_requests`（默认 `instances`）限制。高优先级文件的**已就绪页面**优先取得空闲工作线程；不抢占已开始的推理或文档渲染，持续高优先级任务可能导致低优先级等待。每个文件按页号汇总结果，文件失败不会中断其他任务；断开 HTTP 连接不取消已提交任务。
+`document-workers`（默认 2）控制同时进行文件读取、PDF 渲染、Office 转换的文档数，按待处理文件优先级领取任务；`max-queued-pages`（默认 2）约束就绪页面队列；`--max-queued-page-bytes`（默认 256 MiB）同时约束队列中 RGB 图像与拷贝预留字节，超过单页限制的渲染页使所属任务失败。读取线程完成页面拷贝前会预留名额与字节；其他线程可继续调度。`page-workers`（默认 4）限制同时在处理的页面数；`--box-workers`（默认 1，范围 1–128）是**所有页面共享**的 BOX 工作线程数，设置为大于 1 时单页多个 BOX 能同时识别，不会为每页再创建一套 BOX 线程。每页最多向全局池提交 `min(BOX 数, box-workers)` 个任务；布局仍先在页面线程完成。各模型还受自己的 `max_concurrent_requests`（默认 `instances`）限制。高优先级文件的**已就绪页面**优先取得空闲页面线程；BOX 池的排队不继承文件优先级。每个文件按页号和 BOX 原顺序汇总结果，文件失败不会中断其他任务；断开 HTTP 连接不取消已提交任务。
 
-页面字节限制针对等待队列及其预留拷贝，不包含正在转换的子进程、读取线程当前页、正在推理的页面、BOX 裁剪图像和结果缓冲。需结合 `document-workers`、`page-workers`、`document.max_pixels` 和容器内存预算设置，不能将该值直接当作进程 RSS 上限。HTTP 当前使用每连接一个服务线程，`--http-connections` 默认 128、可配 16–1024；提高该值会增加线程/FD 占用。应在活跃任务上限之外留出状态轮询和结果下载连接。
+页面字节限制针对等待队列及其预留拷贝，不包含正在转换的子进程、读取线程当前页、正在推理的页面、BOX 裁剪图像和结果缓冲。需结合 `document-workers`、`page-workers`、`box-workers`、`document.max_pixels` 和容器内存预算设置，不能将该值直接当作进程 RSS 上限。HTTP 当前使用每连接一个服务线程，`--http-connections` 默认 128、可配 16–1024；提高该值会增加线程/FD 占用。应在活跃任务上限之外留出状态轮询和结果下载连接。
 
-可在[模型池配置](configuration.md#模型池)里为每个模型设置 `batch_size` 和 `max_batch_wait_ms`。相同模型 ID 的跨文件、跨页 BOX 可共同组成一次原生批量推理；`max_concurrent_requests` 是同时运行的批次数上限；若只有一个 vLLM 服务但需要 8 个后端请求同时在途，设置 `instances: 1, max_concurrent_requests: 8`，并相应设置 `--page-workers 8`。等待组批的页面仍计入 `page-workers` 并持有裁剪图像，不能只按已就绪页队列的字节上限估算进程内存。
+可在[模型池配置](configuration.md#模型池)里为每个模型设置 `batch_size` 和 `max_batch_wait_ms`。相同模型 ID 的跨文件、跨页 BOX 可共同组成一次原生批量推理；`max_concurrent_requests` 是同时运行的批次数上限。单页多 BOX + 单套 vLLM 服务可用 `instances: 1, max_concurrent_requests: 8`，并启动 `--page-workers 4 --box-workers 8 --document-workers 4`；即使仅有 1 页在 OCR 阶段，也能向后端发出最多 8 个 BOX 请求。vLLM 的客户端 `batch_size` 保持 1，具体并行度取决于 BOX 数和服务端容量。等待组批的页面仍计入 `page-workers` 并持有裁剪图像，不能只按已就绪页队列的字节上限估算进程内存。
 
 本版单进程的任务状态仅在内存中，原始文件与成功输出保留在 data-dir 中；服务重启不会自动恢复旧任务，`max-jobs` 是进程生命周期内累计接受的任务上限。尚不支持删除/取消、运行中更改优先级、持久化队列、跨节点/多租户调度或幂等键。模型初始化在服务启动时进行。
 

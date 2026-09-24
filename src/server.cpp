@@ -1,4 +1,5 @@
 #include "omniocr/core.hpp"
+#include "box_pool.hpp"
 #include <microhttpd.h>
 #include <algorithm>
 #include <atomic>
@@ -37,7 +38,7 @@ struct Options {
     size_t max_upload_bytes = 64 * 1024 * 1024, max_jobs = 1000;
     size_t max_active_jobs = 64, max_inflight_upload_bytes = 256 * 1024 * 1024;
     size_t max_queued_page_bytes = 256 * 1024 * 1024;
-    int page_workers = 4, document_workers = 2, max_queued_pages = 2;
+    int page_workers = 4, box_workers = 1, document_workers = 2, max_queued_pages = 2;
     unsigned http_connections = 128;
 };
 bool below(const fs::path& root, const fs::path& path) {
@@ -160,6 +161,7 @@ class ServerScheduler {
     Json document_settings_;
     int schema_version_ = 0;
     Options options_;
+    BoxTaskPool box_pool_;
     std::mutex mutex_;
     std::condition_variable changed_;
     std::map<std::string, std::shared_ptr<Job>> jobs_;
@@ -320,9 +322,15 @@ class ServerScheduler {
                 if (work.job->state == "failed") continue;
             }
             try {
-                // Bounded globally by page_workers; shared per-model leases are
-                // additionally bounded by each model's max_concurrent_requests setting.
-                Page page = pipeline_.process_page(work.number, work.image, work.job->output, 1);
+                // BOX work uses a separate fixed pool so one page can expose
+                // several regions concurrently without page_workers * box_workers
+                // OS threads. The model pool still bounds backend calls.
+                Page page = options_.box_workers > 1 ?
+                    pipeline_.process_page(work.number, work.image, work.job->output,
+                        options_.box_workers, [this](std::function<void()> task) {
+                            return box_pool_.submit(std::move(task));
+                        }) :
+                    pipeline_.process_page(work.number, work.image, work.job->output, 1);
                 Document done;
                 bool ready;
                 {
@@ -348,7 +356,8 @@ public:
     explicit ServerScheduler(Json config, Options options)
         : pipeline_(config), document_settings_(config.value("document", Json::object())),
           schema_version_(config.value("output",Json::object()).value("schema_version",0)),
-          options_(std::move(options)) {
+          options_(std::move(options)),
+          box_pool_(options_.box_workers > 1 ? options_.box_workers : 0) {
         fs::create_directories(options_.data_dir / "jobs");
         fs::permissions(options_.data_dir / "jobs", fs::perms::owner_all,
                         fs::perm_options::replace);
@@ -681,7 +690,7 @@ int main(int argc, char** argv) {
         Options options;
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "omniocr-server --config CONFIG --data-dir DIR [--allowed-input-root DIR]"
-                         " [--host 127.0.0.1] [--port 8080] [--page-workers N]"
+                         " [--host 127.0.0.1] [--port 8080] [--page-workers N] [--box-workers N]"
                          " [--document-workers N] [--max-queued-pages N]"
                          " [--max-upload-bytes N] [--max-jobs N] [--max-active-jobs N]"
                          " [--max-inflight-upload-bytes N] [--max-queued-page-bytes N]"
@@ -694,6 +703,7 @@ int main(int argc, char** argv) {
             const std::string key = argv[i];
             if (key != "--config" && key != "--data-dir" && key != "--allowed-input-root" &&
                 key != "--host" && key != "--port" && key != "--page-workers" &&
+                key != "--box-workers" &&
                 key != "--document-workers" && key != "--max-queued-pages" &&
                 key != "--max-upload-bytes" && key != "--max-jobs" &&
                 key != "--max-active-jobs" && key != "--max-inflight-upload-bytes" &&
@@ -724,6 +734,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("--host supports 127.0.0.1 or 0.0.0.0");
         options.port = static_cast<unsigned short>(parse("--port", 8080, 1, 65535));
         options.page_workers = parse("--page-workers", 4, 1, 128);
+        options.box_workers = parse("--box-workers", 1, 1, 128);
         options.document_workers = parse("--document-workers", 2, 1, 32);
         options.max_queued_pages = parse("--max-queued-pages", 2, 1, 256);
         options.max_jobs = size_t(parse("--max-jobs", 1000, 1, 100000));

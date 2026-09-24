@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -104,6 +105,7 @@ struct BatchJob {
 };
 struct BatchOptions {
     int page_workers = 0;          // 0: use execution.workers
+    int box_workers = 1;           // shared BOX threads; 1 keeps serial page processing
     int max_active_documents = 2;  // concurrent document readers/converters
     int max_queued_pages = 2;      // global queued images; bounds memory
 };
@@ -121,7 +123,9 @@ public:
                                        BatchOptions options = {});
 private:
     friend class ServerScheduler;  // Persistent REST dispatcher shares the bounded model registry.
-    Page process_page(int number, const Image& image, const fs::path& output_dir, int box_workers);
+    using BoxSubmit = std::function<std::future<void>(std::function<void()>)>;
+    Page process_page(int number, const Image& image, const fs::path& output_dir,
+                      int box_workers, const BoxSubmit& submit = {});
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
 };

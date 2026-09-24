@@ -102,7 +102,7 @@ ctest --test-dir build --output-on-failure
 | 运行中持续提交文件 | [REST 服务](docs/server.md) | 路径提交或原始二进制上传，异步查询状态与结果 |
 | 嵌入 C++ 应用 | [C++ 集成](docs/architecture.md#c-集成) | 复用 Pipeline，或扩展 Model / TensorEngine |
 
-优先级作用于已就绪页面，不抢占正在运行的推理。服务与批处理使用全局页面工作线程，每页 BOX 串行；单文件 CLI 的 BOX 并发由 `execution.workers` 控制。详见 [调度与资源生命周期](docs/architecture.md)。
+优先级作用于已就绪页面，不抢占正在运行的推理。服务与批处理使用全局页面工作线程，可设置共享的 `box_workers` 让单页 BOX 并发识别；默认 1 保持原有串行行为。单文件 CLI 的 BOX 并发由 `execution.workers` 控制。详见 [调度与资源生命周期](docs/architecture.md)。
 
 ## 文档导航
 

@@ -63,7 +63,7 @@
 
 在 v2 配置中把相同参数写到 `executors.<id>`，多个 model binding 共用这一批队列。原有 v2 `max_inflight` 仍映射到 `instances`，可以另设 `max_concurrent_requests` 调整实际在途上限。将不同任务绑定到同一执行池前须确认该模型、prompt 与返回协议兼容。
 
-vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 每个槽位复用自己的连接，不在多个线程同时使用同一客户端；实际在途上限还受 `page_workers`（单文件模式为 `execution.workers`）、文件数与后端自身容量约束；详见 [并发与性能](performance.md)。
+vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 每个槽位复用自己的连接，不在多个线程同时使用同一客户端；实际在途上限还受 REST 的 `--box-workers`（默认 1）或批处理的 `options.box_workers`、BOX 数及后端自身容量约束。单文件 CLI 使用 `execution.workers`，详见 [并发与性能](performance.md)。
 
 ## vLLM
 
