@@ -51,6 +51,19 @@ def run(binary):
                         '--output', str(root / 'out')], cwd='/', check=True, timeout=30)
         result = json.loads((root / 'out/result.json').read_text())
         assert result['pages'][0]['blocks'][0]['text'] == 'A中'
+        # One configured instance can expose several independent local engine
+        # handles to parallel page workers (these each load their own weights).
+        config['models']['recognizer'].update(instances=1, max_concurrent_requests=3)
+        (root / 'config.json').write_text(json.dumps(config))
+        jobs = {'options': {'page_workers': 3, 'max_active_documents': 3,
+                            'max_queued_pages': 3},
+                'jobs': [{'input': str(root / 'image.ppm'),
+                          'output': str(root / f'parallel-{i}')} for i in range(3)]}
+        (root / 'jobs.json').write_text(json.dumps(jobs))
+        subprocess.run([binary, '--config', str(root / 'config.json'), '--batch', str(root / 'jobs.json')],
+                       check=True, timeout=30)
+        for job in jobs['jobs']:
+            assert json.loads((Path(job['output']) / 'result.json').read_text())['pages'][0]['blocks'][0]['text'] == 'A中'
         config['models']['recognizer']['preprocess']['width'] = 3
         (root / 'config.json').write_text(json.dumps(config))
         failure = subprocess.run([binary, '--config', str(root / 'config.json'), '--input', str(root / 'image.ppm'),
@@ -90,7 +103,7 @@ def run(binary):
         failure = subprocess.run([binary, '--config', str(root/'config.json'), '--input', str(root/'image.ppm'),
                                   '--output', str(root/'bad-batch')], capture_output=True, timeout=30)
         assert failure.returncode == 1 and b'static input batch dimension' in failure.stderr
-    print('PASS: native ONNX layout/CTC, full dynamic batch, static padded tail and shape validation')
+    print('PASS: native ONNX layout/CTC, parallel handles, full dynamic batch, static padded tail and shape validation')
 
 
 if __name__ == '__main__':

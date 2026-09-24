@@ -42,6 +42,7 @@ void validate_config(const Json& c) {
     for (const auto& [id, m] : models.items()) {
         require(!id.empty(), "empty model ID");
         positive(m, "instances", 1, 128);
+        positive(m, "max_concurrent_requests", m.value("instances", 1), 128);
         positive(m, "acquire_timeout_ms", 60000, 3600000);
         positive(m, "batch_size", 1, 128);
         positive(m, "max_pending_requests", 256, 100000);

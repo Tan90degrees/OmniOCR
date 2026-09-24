@@ -31,7 +31,7 @@ struct ModelRegistry::Impl {
         std::mutex mutex;
         std::condition_variable ready;
         int timeout_ms;
-        int batch_size = 1, max_wait_ms = 5, max_pending = 256;
+        int batch_size = 1, max_wait_ms = 5, max_pending = 256, max_concurrent = 1;
         bool stopping = false;
         ~Pool() {
             { std::lock_guard<std::mutex> guard(mutex); stopping = true; }
@@ -113,7 +113,7 @@ struct ModelRegistry::Impl {
         }
         void start() {
             if (batch_size <= 1) return;
-            for (size_t i = 0; i < models.size(); ++i)
+            for (int i = 0; i < max_concurrent; ++i)
                 workers.emplace_back([this, i] { batch_worker(i); });
         }
     };
@@ -128,17 +128,23 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
         pool->max_pending = config.value("max_pending_requests", 256);
         const int count = config.value("instances", 1);
         if (count <= 0 || count > 128) throw std::runtime_error("invalid instances for " + id);
+        pool->max_concurrent = config.value("max_concurrent_requests", count);
+        if (pool->max_concurrent < 1 || pool->max_concurrent > 128)
+            throw std::runtime_error("invalid max_concurrent_requests for " + id);
         if (pool->batch_size < 1 || pool->batch_size > 128 || pool->max_wait_ms < 0 ||
             (pool->batch_size > 1 && pool->max_wait_ms >= pool->timeout_ms) ||
             pool->max_pending < pool->batch_size)
             throw std::runtime_error("invalid batch settings for " + id);
-        for (int i = 0; i < count; ++i) {
+        // Each active slot owns an independent backend handle. HTTP slots are
+        // lightweight connection clients; local backends require separate
+        // model/engine instances because their handles are not reentrant.
+        for (int i = 0; i < std::max(count, pool->max_concurrent); ++i) {
             auto model = factory(config, size_t(i));
             if (!model) throw std::runtime_error("model factory returned null for " + id);
             if (pool->batch_size > 1 && !model->supports_batch())
                 throw std::runtime_error("model does not support native batching: " + id);
             pool->models.push_back(std::move(model));
-            pool->available.push_back(size_t(i));
+            if (i < pool->max_concurrent) pool->available.push_back(size_t(i));
         }
         pool->start();
         impl_->pools.emplace(id, std::move(pool));

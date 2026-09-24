@@ -321,7 +321,7 @@ class ServerScheduler {
             }
             try {
                 // Bounded globally by page_workers; shared per-model leases are
-                // additionally bounded by each model's instances setting.
+                // additionally bounded by each model's max_concurrent_requests setting.
                 Page page = pipeline_.process_page(work.number, work.image, work.job->output, 1);
                 Document done;
                 bool ready;

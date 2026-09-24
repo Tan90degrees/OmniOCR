@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from PIL import Image
@@ -32,7 +33,17 @@ class Handler(BaseHTTPRequestHandler):
             pixels.append(image.getpixel((0, 0))[0])
         with self.server.lock:
             self.server.batches.append(pixels)
-        body = json.dumps({'results': [{'text': str(pixel)} for pixel in pixels]}).encode()
+            sequence = len(self.server.batches)
+            self.server.active += 1
+            self.server.peak = max(self.server.peak, self.server.active)
+        try:
+            if sequence <= 2:
+                self.server.gate.wait(timeout=8)
+            time.sleep(.02)
+            body = json.dumps({'results': [{'text': str(pixel)} for pixel in pixels]}).encode()
+        finally:
+            with self.server.lock:
+                self.server.active -= 1
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
@@ -45,6 +56,8 @@ def run(binary):
     backend.daemon_threads = True
     backend.lock = threading.Lock()
     backend.batches = []
+    backend.active = backend.peak = 0
+    backend.gate = threading.Barrier(2, timeout=8)
     thread = threading.Thread(target=backend.serve_forever, daemon=True)
     thread.start()
     try:
@@ -55,7 +68,8 @@ def run(binary):
                 'models': {'layout': {'backend': 'mock', 'response': {'boxes': [
                     {'type': 'title', 'bbox': [0, 0, 1, .5], 'order': 0},
                     {'type': 'text', 'bbox': [0, .5, 1, 1], 'order': 1}]}},
-                    'ocr': {'backend': 'http_json', 'instances': 1, 'batch_size': 4,
+                    'ocr': {'backend': 'http_json', 'instances': 1,
+                        'max_concurrent_requests': 2, 'batch_size': 4,
                         'max_batch_wait_ms': 100,
                         'endpoint': f'http://127.0.0.1:{backend.server_port}/single',
                         'batch_endpoint': f'http://127.0.0.1:{backend.server_port}/batch'}},
@@ -90,6 +104,7 @@ def run(binary):
                     assert len(backend.batches) < 16, backend.batches
                     assert any(len({value % 100 for value in batch}) > 1 for batch in backend.batches), backend.batches
                     assert sum(map(len, backend.batches)) == 16, backend.batches
+                    assert backend.peak == 2, backend.peak
                 finally:
                     proc.terminate()
                     try: proc.wait(timeout=10)

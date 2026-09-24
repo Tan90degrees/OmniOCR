@@ -119,7 +119,7 @@ void v2_config_test() {
             {"layout_pool",{{"backend","mock"},{"response",{{"boxes",Json::array({
                 {{"type","text"},{"bbox",{0,0,1,1}}}
             })}}}}},
-            {"ocr_pool",{{"backend","mock"},{"max_inflight",1},{"batch_size",2},
+            {"ocr_pool",{{"backend","mock"},{"max_inflight",1},{"max_concurrent_requests",2},{"batch_size",2},
                          {"response",{{"text","v2 recognition"}}}}}
         }},
         {"models",{
@@ -132,6 +132,8 @@ void v2_config_test() {
     auto runtime=normalize_config(c);
     expect(runtime["version"]==1 && runtime["models"].size()==2 &&
            runtime["models"]["ocr_pool"]["batch_size"]==2 &&
+           runtime["models"]["ocr_pool"]["instances"]==1 &&
+           runtime["models"]["ocr_pool"]["max_concurrent_requests"]==2 &&
            runtime["layout"]["model"]=="layout_pool" &&
            runtime["routes"]["text"]["model"]=="ocr_pool" &&
            runtime["routes"]["text"]["adapter"]=="vlm.ovisocr2",
@@ -175,6 +177,23 @@ void pool_test() {
     expect(state.constructed == 2 && state.peak == 2 && state.active == 0, "pool bound or lease leak");
     expect(registry.infer("shared", image(), "after")["text"] == "after", "lease not returned after exception");
     throws([&] { registry.infer("missing", image(), ""); });
+    State expanded;
+    ModelRegistry extra({{"ocr", {{"instances", 1}, {"max_concurrent_requests", 4},
+                                {"acquire_timeout_ms", 1000}}}},
+        [&](const Json&, size_t) { return std::make_unique<Probe>(expanded); });
+    std::promise<void> start_extra;
+    auto go_extra = start_extra.get_future().share();
+    std::vector<std::future<Json>> parallel;
+    for (int i = 0; i < 8; ++i) parallel.push_back(std::async(std::launch::async, [&, i] {
+        go_extra.wait();
+        auto sample = image();
+        return extra.infer("ocr", sample, std::to_string(i));
+    }));
+    start_extra.set_value();
+    for (int i = 0; i < 8; ++i)
+        expect(parallel[i].get().at("text") == std::to_string(i), "parallel result routing");
+    expect(expanded.constructed == 4 && expanded.peak == 4 && expanded.active == 0,
+           "max_concurrent_requests did not bound independent model slots");
     // Acquisition has its own timeout, independent of backend inference timeout.
     struct Gate : Model {
         std::promise<void>& started; std::shared_future<void> release;
@@ -268,6 +287,11 @@ void dynamic_batch_test() {
            blocked.infer("m", img, "after timeout")["text"] == "recovered",
            "timed out request leaked into the next batch");
     auto invalid_config = config();
+    invalid_config["models"]["shared"]["max_concurrent_requests"] = 0;
+    throws([&] { validate_config(invalid_config); });
+    invalid_config["models"]["shared"]["max_concurrent_requests"] = 129;
+    throws([&] { validate_config(invalid_config); });
+    invalid_config["models"]["shared"].erase("max_concurrent_requests");
     invalid_config["models"]["shared"]["batch_size"] = 2;
     invalid_config["models"]["shared"]["max_batch_wait_ms"] = 1.5;
     throws([&] { validate_config(invalid_config); });

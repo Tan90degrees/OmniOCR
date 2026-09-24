@@ -32,7 +32,7 @@ flowchart TD
 
 `models` 定义模型池，`layout.model` 选择版面模型，`routes` 按 BOX 类型选择模型或执行保存图片、跳过识别等动作。多个类型引用**同一个模型 ID** 就共享实例池；不同 ID 即使指向同一文件也会分别加载。
 
-本地 OM/ONNX 的 `instances` 是加载的实例数；vLLM/HTTP 的 `instances` 是客户端在途请求槽位，服务端副本需要自行部署。详见 [配置与模型适配](docs/configuration.md)。
+每个模型可独立设置 `max_concurrent_requests`（默认等于 `instances`）和 `batch_size`。例如一套 vLLM 服务使用 `instances: 1, max_concurrent_requests: 8` 可同时接收 8 个后端请求；本地 OM/ONNX 的额外并发槽位会加载额外模型句柄，须规划设备内存。详见 [配置与模型适配](docs/configuration.md)。
 
 ## 支持的文件
 

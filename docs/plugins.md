@@ -16,7 +16,7 @@
 
 ## v2 配置和结果 schema 独立
 
-`version: 1` 旧配置继续受支持；`version: 2` 把 `executors`、`models` 绑定和 `pipeline` 拆分。读取配置时归一化为现有执行池：同一 `executor` ID 的不同模型绑定共用一个池，`max_inflight` 转为实例/请求槽位，`backend: openai_chat` 映射已有 vLLM HTTP 实现，结果 `model` 保留逻辑绑定 ID。使用 [PP-DocLayoutV3 + OvisOCR2 v2 配置示例](../configs/doclayout-v3-http-ovisocr2.v2.json)，修改 HTTP 端点和真实 served model name 后运行：
+`version: 1` 旧配置继续受支持；`version: 2` 把 `executors`、`models` 绑定和 `pipeline` 拆分。读取配置时归一化为现有执行池：同一 `executor` ID 的不同模型绑定共用一个池，原有 `max_inflight` 映射为 `instances`，可另设 `max_concurrent_requests` 控制同一服务的实际在途请求数；`backend: openai_chat` 映射已有 vLLM HTTP 实现，结果 `model` 保留逻辑绑定 ID。使用 [PP-DocLayoutV3 + OvisOCR2 v2 配置示例](../configs/doclayout-v3-http-ovisocr2.v2.json)，修改 HTTP 端点和真实 served model name 后运行：
 
 ```bash
 python tools/paddle_layout_server.py --model PP-DocLayoutV3 --device cpu --port 8001

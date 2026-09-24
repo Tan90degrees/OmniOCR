@@ -41,11 +41,11 @@
 
 ## 模型池
 
-`instances` 默认 1，范围 1–128；`acquire_timeout_ms` 默认 60000。实例只被一个调用独占使用。总模型内存近似为各本地模型的 `instances × 单实例内存` 之和，不能把增大实例数当成免费并发。对 ACL，`device_ids: [0,1]` 按实例序号轮转分配设备。
+`instances` 默认 1，范围 1–128；`max_concurrent_requests` 默认等于 `instances`，范围 1–128，控制此模型 ID **同时在途的后端调用数**；`acquire_timeout_ms` 默认 60000。比如一套已部署的 vLLM 权重用 `instances: 1, max_concurrent_requests: 8`，框架建立 8 个可复用的 HTTP 客户端，同时最多发出 8 个请求，远端模型仍只有一套。小于 `instances` 时只启用前若干槽位；大于 `instances` 时为每个额外槽位构建独立模型句柄，以免一个句柄被并发访问。**本地 ACL/ONNX 及外部插件可能因此加载额外权重和设备缓冲**，资源须按 `max(instances, max_concurrent_requests)` 个句柄预算；不支持共享一个不可重入的本地推理句柄。对 ACL，`device_ids: [0,1]` 按句柄序号轮转分配设备。
 
-每个模型 ID（v2 为每个 `executor`）独立设置 `batch_size`，默认 1，范围 1–128；大于 1 时启用全 Pipeline 共享的组批队列，同一模型来自**不同文件、页面和 BOX 类型**的请求可进入一批。`max_batch_wait_ms` 默认 5、范围 0–1000：从队首请求到达起最多等待该时间，达到批大小则立即执行，尾批到时执行；必须小于 `acquire_timeout_ms`。`max_pending_requests` 默认 256，至少等于 `batch_size`，排满或排队超时都会明确失败；候选模型可按原路由规则回退。实例数控制并行批次上限，每实例一个工作线程和一次原生批量调用；结果按提交顺序归还给原 BOX，文档输出仍按页号和阅读顺序排列。
+每个模型 ID（v2 为每个 `executor`）独立设置 `batch_size`，默认 1，范围 1–128；大于 1 时启用全 Pipeline 共享的组批队列，同一模型来自**不同文件、页面和 BOX 类型**的请求可进入一批。`max_batch_wait_ms` 默认 5、范围 0–1000：从队首请求到达起最多等待该时间，达到批大小则立即执行，尾批到时执行；必须小于 `acquire_timeout_ms`。`max_pending_requests` 默认 256，至少等于 `batch_size`，排满或排队超时都会明确失败；候选模型可按原路由规则回退。`max_concurrent_requests` 控制并行批次数上限，每个活跃槽位执行一次原生批量调用；结果按提交顺序归还给原 BOX，文档输出仍按页号和阅读顺序排列。
 
-只有支持一次真实批量调用的后端接受 `batch_size>1`：ONNX、导出固定 batch 的 ACL OM、带显式 `batch_endpoint` 的 `http_json`、mock 及实现批量入口的 C ABI v2 插件。无批量能力的 C ABI v1/C++ 后端在初始化时报错，不会在组批后逐条串行执行。`vllm` 的 Chat Completions 单请求协议不接受一次多图多任务批量调用；请保持框架 `batch_size=1`，使用 `instances` 提供并发请求，并在 vLLM 服务中配置其自身的连续批处理容量。组批窗口会增加低负载单请求延迟；批大小也不是 `instances` 或 vLLM `max_num_seqs` 的别名。
+只有支持一次真实批量调用的后端接受 `batch_size>1`：ONNX、导出固定 batch 的 ACL OM、带显式 `batch_endpoint` 的 `http_json`、mock 及实现批量入口的 C ABI v2 插件。无批量能力的 C ABI v1/C++ 后端在初始化时报错，不会在组批后逐条串行执行。`vllm` 的 Chat Completions 单请求协议不接受一次多图多任务批量调用；请保持框架 `batch_size=1`，用 `max_concurrent_requests` 向同一服务发出并发请求，在 vLLM 服务中配置其自身的连续批处理容量。组批窗口会增加低负载单请求延迟；批大小也不是并发槽位或 vLLM `max_num_seqs` 的别名。
 
 一次底层批量推理整体失败时，该批次内所有请求收到同一个模型错误，按各自 BOX 的候选模型或 `on_error` 策略处理；不会自动重试整个批次，以免重复执行外部推理。部署前应验证模型能接受批内不同文件的输入与 prompt，并单独测高低负载下的吞吐、P95/P99 和内存占用。
 
@@ -54,15 +54,16 @@
   "ocr": {
     "backend": "http_json", "endpoint": "http://127.0.0.1:8001/infer",
     "batch_endpoint": "http://127.0.0.1:8001/batch",
-    "instances": 2, "batch_size": 8, "max_batch_wait_ms": 10,
+    "instances": 2, "max_concurrent_requests": 4,
+    "batch_size": 8, "max_batch_wait_ms": 10,
     "max_pending_requests": 256
   }
 }
 ```
 
-在 v2 配置中把相同参数写到 `executors.<id>`，多个 model binding 共用这一批队列。将不同任务绑定到同一执行池前须确认该模型、prompt 与返回协议兼容。
+在 v2 配置中把相同参数写到 `executors.<id>`，多个 model binding 共用这一批队列。原有 v2 `max_inflight` 仍映射到 `instances`，可以另设 `max_concurrent_requests` 调整实际在途上限。将不同任务绑定到同一执行池前须确认该模型、prompt 与返回协议兼容。
 
-vLLM/HTTP 的 `instances` 是请求槽位，不能创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 实例会复用各自的连接，实例池保证单客户端不并发调用；详见 [并发与性能](performance.md)。
+vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 每个槽位复用自己的连接，不在多个线程同时使用同一客户端；实际在途上限还受 `page_workers`（单文件模式为 `execution.workers`）、文件数与后端自身容量约束；详见 [并发与性能](performance.md)。
 
 ## vLLM
 
