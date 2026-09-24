@@ -45,6 +45,8 @@
 
 每个模型 ID（v2 为每个 `executor`）独立设置 `batch_size`，默认 1，范围 1–128；大于 1 时启用全 Pipeline 共享的组批队列，同一模型来自**不同文件、页面和 BOX 类型**的请求可进入一批。`max_batch_wait_ms` 默认 5、范围 0–1000：从队首请求到达起最多等待该时间，达到批大小则立即执行，尾批到时执行；必须小于 `acquire_timeout_ms`。`max_pending_requests` 默认 256，至少等于 `batch_size`，排满或排队超时都会明确失败；候选模型可按原路由规则回退。`max_concurrent_requests` 控制并行批次数上限，每个活跃槽位执行一次原生批量调用；结果按提交顺序归还给原 BOX，文档输出仍按页号和阅读顺序排列。
 
+`instance_overrides` 可按活跃槽位编号覆盖 `batch_size` 和 `max_batch_wait_ms`，数组第 0 项对应实例 0，未列出的实例继承模型级设置。所有实例从**同一个模型 ID 的全局 BOX 队列**取任务；空闲实例按各自的批大小取队首请求，达到其窗口时执行尾批，避免预先将 BOX 固定分片到繁忙实例。队列上限至少覆盖模型级与各实例设置中最大的批大小；静态 batch ONNX/ACL 权重必须与相应实例的设置匹配，不同尺寸的实例要有相容的模型形状。`batch_size: 1` 的槽位直接执行单条推理。若所有实例都设为 1，沿用无后台组批线程的有界 FIFO 实例租赁路径。全局队列不会越过 `box_workers` 的输入并发上限，实测时须同时配置该值。
+
 只有支持一次真实批量调用的后端接受 `batch_size>1`：ONNX、导出固定 batch 的 ACL OM、带显式 `batch_endpoint` 的 `http_json`、mock 及实现批量入口的 C ABI v2 插件。无批量能力的 C ABI v1/C++ 后端在初始化时报错，不会在组批后逐条串行执行。`vllm` 的 Chat Completions 单请求协议不接受一次多图多任务批量调用；请保持框架 `batch_size=1`，用 `max_concurrent_requests` 向同一服务发出并发请求，在 vLLM 服务中配置其自身的连续批处理容量。组批窗口会增加低负载单请求延迟；批大小也不是并发槽位或 vLLM `max_num_seqs` 的别名。
 
 一次底层批量推理整体失败时，该批次内所有请求收到同一个模型错误，按各自 BOX 的候选模型或 `on_error` 策略处理；不会自动重试整个批次，以免重复执行外部推理。部署前应验证模型能接受批内不同文件的输入与 prompt，并单独测高低负载下的吞吐、P95/P99 和内存占用。
@@ -56,6 +58,7 @@
     "batch_endpoint": "http://127.0.0.1:8001/batch",
     "instances": 2, "max_concurrent_requests": 4,
     "batch_size": 8, "max_batch_wait_ms": 10,
+    "instance_overrides": [{"batch_size": 4, "max_batch_wait_ms": 5}, {}],
     "max_pending_requests": 256
   }
 }

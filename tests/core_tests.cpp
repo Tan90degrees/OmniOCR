@@ -120,6 +120,7 @@ void v2_config_test() {
                 {{"type","text"},{"bbox",{0,0,1,1}}}
             })}}}}},
             {"ocr_pool",{{"backend","mock"},{"max_inflight",1},{"max_concurrent_requests",2},{"batch_size",2},
+                         {"instance_overrides",Json::array({{{"batch_size",2}},Json::object()})},
                          {"response",{{"text","v2 recognition"}}}}}
         }},
         {"models",{
@@ -132,6 +133,7 @@ void v2_config_test() {
     auto runtime=normalize_config(c);
     expect(runtime["version"]==1 && runtime["models"].size()==2 &&
            runtime["models"]["ocr_pool"]["batch_size"]==2 &&
+           runtime["models"]["ocr_pool"]["instance_overrides"].size()==2 &&
            runtime["models"]["ocr_pool"]["instances"]==1 &&
            runtime["models"]["ocr_pool"]["max_concurrent_requests"]==2 &&
            runtime["layout"]["model"]=="layout_pool" &&
@@ -253,6 +255,52 @@ void dynamic_batch_test() {
            "partial batch did not flush by deadline");
     expect(state.groups.size() == 2 && state.groups[1].size() == 1,
            "partial batch should be one native invocation");
+    // Each instance takes work from the same FIFO, even when batch profiles
+    // differ. Verify native batch sizing, instance affinity and result routing.
+    struct SlotBatch : Model {
+        size_t slot;
+        int configured_batch;
+        std::atomic<int>& active;
+        std::atomic<int>& peak;
+        SlotBatch(size_t i, int b, std::atomic<int>& a, std::atomic<int>& p)
+            : slot(i), configured_batch(b), active(a), peak(p) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            expect(configured_batch == 1, "scalar slot did not receive its own batch configuration");
+            return {{"text", prompt}, {"slot", slot}};
+        }
+        bool supports_batch() const override { return true; }
+        std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+            expect(configured_batch == 2 && inputs.size() <= 2,
+                   "batch slot exceeded its configured batch size");
+            const int current = ++active;
+            int old = peak.load();
+            while (old < current && !peak.compare_exchange_weak(old, current)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            --active;
+            std::vector<Json> out;
+            for (const auto& input : inputs) out.push_back({{"text", input.prompt}, {"slot", slot}});
+            return out;
+        }
+    };
+    std::atomic<int> active{0}, peak{0};
+    ModelRegistry profiled({{"ocr", {{"instances", 1}, {"max_concurrent_requests", 2},
+        {"batch_size", 2}, {"max_batch_wait_ms", 5},
+        {"instance_overrides", Json::array({{{"batch_size", 1}}, {{"batch_size", 2}}})}}}},
+        [&](const Json& settings, size_t slot) {
+            return std::make_unique<SlotBatch>(slot, settings.at("batch_size").get<int>(), active, peak);
+        });
+    std::vector<std::future<Json>> routed;
+    for (int i = 0; i < 16; ++i) routed.push_back(std::async(std::launch::async, [&, i] {
+        auto img = image();
+        return profiled.infer("ocr", img, "document-" + std::to_string(i));
+    }));
+    int batch_slot = 0, scalar_slot = 0;
+    for (int i = 0; i < 16; ++i) {
+        const auto value = routed[i].get();
+        expect(value.at("text") == "document-" + std::to_string(i), "instance result routed to wrong BOX");
+        (value.at("slot") == 0 ? scalar_slot : batch_slot)++;
+    }
+    expect(scalar_slot > 0 && batch_slot > 0, "global queue did not balance across instances");
     struct Scalar : Model {
         Json infer(const Image&, const std::string&) override { return Json::object(); }
     };
@@ -298,6 +346,76 @@ void dynamic_batch_test() {
     invalid_config["models"]["shared"]["max_batch_wait_ms"] = 500;
     invalid_config["models"]["shared"]["acquire_timeout_ms"] = 200;
     throws([&] { validate_config(invalid_config); });
+    invalid_config = config();
+    invalid_config["models"]["shared"]["instance_overrides"] = Json::array({{{"batch_size", 2}}});
+    invalid_config["models"]["shared"]["max_pending_requests"] = 1;
+    throws([&] { validate_config(invalid_config); });
+    invalid_config["models"]["shared"]["max_pending_requests"] = 3;
+    invalid_config["models"]["shared"]["instance_overrides"] = Json::array({{{"batch_size", 2}, {"max_batch_wait_ms", 1.5}}});
+    throws([&] { validate_config(invalid_config); });
+    invalid_config["models"]["shared"]["instance_overrides"] = Json::array({Json::object(), Json::object(), Json::object()});
+    throws([&] { validate_config(invalid_config); });
+}
+void box_pool_fairness_test() {
+    std::promise<void> entered, release, second_layout;
+    auto gate = release.get_future().share();
+    std::mutex mutex;
+    std::vector<int> visited;
+    std::atomic<bool> first_seen{false};
+    struct Fixture : Model {
+        bool layout;
+        std::promise<void>& entered, &second_layout;
+        std::shared_future<void> gate;
+        std::mutex& mutex;
+        std::vector<int>& visited;
+        std::atomic<bool>& first_seen;
+        Fixture(bool l, std::promise<void>& e, std::promise<void>& s, std::shared_future<void> g,
+                std::mutex& m, std::vector<int>& v, std::atomic<bool>& f)
+            : layout(l), entered(e), second_layout(s), gate(g), mutex(m), visited(v), first_seen(f) {}
+        Json infer(const Image& img, const std::string&) override {
+            const int value = img.rgb.front();
+            if (layout) {
+                Json boxes = Json::array();
+                const int count = value == 1 ? 8 : 1;
+                for (int i = 0; i < count; ++i)
+                    boxes.push_back({{"type", "text"}, {"bbox", {0, double(i) / count, 1, double(i + 1) / count}}});
+                if (value == 2) second_layout.set_value();
+                return {{"boxes", boxes}};
+            }
+            if (value == 1 && !first_seen.exchange(true)) entered.set_value();
+            if (value == 1) gate.wait();
+            { std::lock_guard<std::mutex> lock(mutex); visited.push_back(value); }
+            return {{"text", std::to_string(value)}};
+        }
+    };
+    auto c = config();
+    Pipeline pipeline(c, [&](const Json& settings, size_t) {
+        return std::make_unique<Fixture>(settings.contains("response") &&
+            settings["response"].contains("boxes"), entered, second_layout, gate, mutex, visited, first_seen);
+    });
+    TempDir output;
+    Image a{16,16,std::vector<uint8_t>(16*16*3,1)};
+    Image b{16,16,std::vector<uint8_t>(16*16*3,2)};
+    for (auto [file, img] : {std::pair{"a.png", a}, std::pair{"b.png", b}}) {
+        auto png = img.png();
+        std::ofstream out(output.path / file, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(png.data()), std::streamsize(png.size()));
+    }
+    auto jobs = std::async(std::launch::async, [&] {
+        return pipeline.run_batch({{output.path / "a.png", output.path / "a-out"},
+                                   {output.path / "b.png", output.path / "b-out"}}, {2, 2, 2, 2});
+    });
+    entered.get_future().wait();
+    second_layout.get_future().wait();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    release.set_value();
+    auto results = jobs.get();
+    expect(results[0].error.empty() && results[1].error.empty() &&
+           results[0].document.pages[0].regions.size() == 8 && results[1].document.pages[0].regions.size() == 1,
+           "page result lost during fair BOX scheduling");
+    const auto b_position = std::find(visited.begin(), visited.end(), 2);
+    expect(b_position != visited.end() && b_position < visited.end() - 1,
+           "a dense page monopolized the global BOX pool");
 }
 void codec_test() {
     auto table = table_to_html("<fcel>A&B<lcel><nl><ucel><xcel><nl>");
@@ -505,7 +623,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); dynamic_batch_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

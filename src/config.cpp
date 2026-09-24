@@ -1,5 +1,6 @@
 #include "omniocr/core.hpp"
 #include "omniocr/plugins.hpp"
+#include <algorithm>
 #include <fstream>
 #include <cstdint>
 #include <cmath>
@@ -58,11 +59,31 @@ void validate_config(const Json& c) {
                          "max_batch_wait_ms out of range");
             wait = value.get<int>();
         }
-        require(m.value("max_pending_requests", 256) >= batch_size,
-                "max_pending_requests must be at least batch_size");
-        if (batch_size > 1)
-            require(wait < m.value("acquire_timeout_ms", 60000),
-                    "max_batch_wait_ms must be less than acquire_timeout_ms");
+        const auto overrides = m.value("instance_overrides", Json::array());
+        require(overrides.is_array() && overrides.size() <= size_t(m.value("max_concurrent_requests", m.value("instances", 1))),
+                "instance_overrides must be an array no longer than max_concurrent_requests");
+        bool needs_batch = batch_size > 1;
+        int largest_batch = batch_size;
+        for (const auto& slot : overrides) {
+            require(slot.is_object(), "instance override must be an object");
+            for (const auto& [key, value] : slot.items())
+                require(key == "batch_size" || key == "max_batch_wait_ms", "unknown instance override: " + key);
+            positive(slot, "batch_size", batch_size, 128);
+            const auto size = slot.value("batch_size", batch_size);
+            const auto window = slot.value("max_batch_wait_ms", wait);
+            require(!slot.contains("max_batch_wait_ms") ||
+                    (slot.at("max_batch_wait_ms").is_number_integer() || slot.at("max_batch_wait_ms").is_number_unsigned()),
+                    "instance max_batch_wait_ms must be an integer");
+            require(window >= 0 && window <= 1000, "instance max_batch_wait_ms out of range");
+            if (size > 1) require(window < m.value("acquire_timeout_ms", 60000),
+                                  "instance max_batch_wait_ms must be less than acquire_timeout_ms");
+            needs_batch |= size > 1;
+            largest_batch = std::max(largest_batch, size);
+        }
+        require(m.value("max_pending_requests", 256) >= largest_batch,
+                "max_pending_requests must be at least the largest instance batch_size");
+        if (batch_size > 1) require(wait < m.value("acquire_timeout_ms", 60000),
+                                    "max_batch_wait_ms must be less than acquire_timeout_ms");
         const auto backend = m.at("backend").get<std::string>();
         require(has_backend(backend), "unknown backend plugin " + backend);
         if (backend == "vllm" || backend == "http_json") {
@@ -72,9 +93,9 @@ void validate_config(const Json& c) {
             positive(m, "connect_timeout_seconds", 10, 3600);
             positive(m, "max_response_bytes", 16777216, 268435456);
             if (backend == "vllm") require(!m.at("model").get<std::string>().empty(), "missing served model name");
-            if (backend == "vllm") require(batch_size == 1,
+            if (backend == "vllm") require(!needs_batch,
                 "vLLM chat API has no native batch request; configure batching in vLLM serving instead");
-            if (backend == "http_json" && batch_size > 1) {
+            if (backend == "http_json" && needs_batch) {
                 const auto endpoint = m.at("batch_endpoint").get<std::string>();
                 require(endpoint.rfind("http://", 0) == 0 || endpoint.rfind("https://", 0) == 0,
                         "batch_endpoint must be an HTTP(S) URL");

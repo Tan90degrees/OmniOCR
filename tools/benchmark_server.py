@@ -128,6 +128,7 @@ def run_once(args, repeat):
             command = [str(Path(args.server_binary).resolve()), "--config", str(config_path),
                        "--data-dir", str(root / "state"), "--allowed-input-root", str(source.parent),
                        "--port", str(port), "--page-workers", str(args.page_workers),
+                       "--box-workers", str(args.box_workers),
                        "--document-workers", str(args.document_workers), "--max-queued-pages", str(args.queued_pages),
                        "--max-jobs", str(args.requests + args.warmup + args.history_jobs)]
             peaks = {"rss_kib": 0, "threads": 0, "fds": 0}
@@ -218,6 +219,7 @@ def main():
     p.add_argument("--config", help="Real model config; requires --input")
     p.add_argument("--input")
     for name, default in (("requests", 256), ("concurrency", 16), ("page-workers", 8),
+                          ("box-workers", 1),
                           ("document-workers", 2), ("queued-pages", 8), ("model-instances", 8),
                           ("boxes", 8), ("warmup", 16), ("history-jobs", 0), ("repeats", 3)):
         p.add_argument("--" + name, type=int, default=default)
@@ -227,7 +229,7 @@ def main():
     p.add_argument("--timeout", type=float, default=120)
     args = p.parse_args()
     if bool(args.config) != bool(args.input): p.error("--config and --input must be provided together")
-    limits = {"requests": 100000, "concurrency": 48, "page_workers": 128, "document_workers": 32,
+    limits = {"requests": 100000, "concurrency": 48, "page_workers": 128, "box_workers": 128, "document_workers": 32,
               "queued_pages": 256, "model_instances": 128, "boxes": 128, "repeats": 100}
     for name, upper in limits.items():
         if not 1 <= getattr(args, name) <= upper: p.error(f"{name} must be 1..{upper}")
