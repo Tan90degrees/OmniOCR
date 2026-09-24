@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "mode": "synthetic",
+  "load_model": "closed-loop fixed client concurrency",
+  "notes": "Completion includes queueing and polling delay; startup/warmup excluded from elapsed. RSS/threads/fds sampled every 10ms for the server process only. No OCR quality assertion. Synthetic delays are explicit, not device latency.",
+  "environment": {
+    "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+    "cpu_count": 9,
+    "server_sha256": "eaa70ba03f7c0ffa45210a335a19afa55aadba9f71080956b41e7c2ed173e70e"
+  },
+  "settings": {
+    "server_binary": "build-perf/omniocr-server",
+    "output": "out/performance/admission-page-budget.json",
+    "config": null,
+    "input": null,
+    "requests": 256,
+    "concurrency": 16,
+    "page_workers": 8,
+    "document_workers": 2,
+    "queued_pages": 8,
+    "model_instances": 8,
+    "boxes": 8,
+    "warmup": 16,
+    "history_jobs": 0,
+    "repeats": 3,
+    "model_delay_ms": 2,
+    "connection_delay_ms": 0,
+    "poll_ms": 5,
+    "timeout": 120
+  },
+  "runs": [
+    {
+      "repeat": 0,
+      "elapsed_seconds": 1.2271911399999453,
+      "counts": {
+        "succeeded": 256,
+        "failed": 0,
+        "timeout": 0,
+        "request_error": 0
+      },
+      "completed_docs_per_second": 208.60646044104539,
+      "completed_pages_per_second": 208.60646044104539,
+      "admission": {
+        "count": 256,
+        "p50_ms": 4.998723000085192,
+        "p95_ms": 9.473559000070964,
+        "p99_ms": 12.28185900004064
+      },
+      "completion": {
+        "count": 256,
+        "p50_ms": 75.99181199998384,
+        "p95_ms": 89.84502099997371,
+        "p99_ms": 94.98912999993081
+      },
+      "process_peaks_including_warmup": {
+        "rss_kib": 12808,
+        "threads": 20,
+        "fds": 36
+      },
+      "synthetic_backend": {
+        "measured_requests": 2048,
+        "measured_new_connections": 0,
+        "total_connections": 8,
+        "peak_inflight": 8
+      }
+    },
+    {
+      "repeat": 1,
+      "elapsed_seconds": 1.2657296219999807,
+      "counts": {
+        "succeeded": 256,
+        "failed": 0,
+        "timeout": 0,
+        "request_error": 0
+      },
+      "completed_docs_per_second": 202.25488568047743,
+      "completed_pages_per_second": 202.25488568047743,
+      "admission": {
+        "count": 256,
+        "p50_ms": 5.644494000080158,
+        "p95_ms": 10.345311999913065,
+        "p99_ms": 16.385304999971595
+      },
+      "completion": {
+        "count": 256,
+        "p50_ms": 78.66048099992895,
+        "p95_ms": 90.82687900001929,
+        "p99_ms": 94.6272979999776
+      },
+      "process_peaks_including_warmup": {
+        "rss_kib": 12908,
+        "threads": 19,
+        "fds": 37
+      },
+      "synthetic_backend": {
+        "measured_requests": 2048,
+        "measured_new_connections": 0,
+        "total_connections": 8,
+        "peak_inflight": 8
+      }
+    },
+    {
+      "repeat": 2,
+      "elapsed_seconds": 1.3433961819999922,
+      "counts": {
+        "succeeded": 256,
+        "failed": 0,
+        "timeout": 0,
+        "request_error": 0
+      },
+      "completed_docs_per_second": 190.5618040531259,
+      "completed_pages_per_second": 190.5618040531259,
+      "admission": {
+        "count": 256,
+        "p50_ms": 6.282750999957898,
+        "p95_ms": 12.851991000047747,
+        "p99_ms": 15.510961000018142
+      },
+      "completion": {
+        "count": 256,
+        "p50_ms": 82.37428199993246,
+        "p95_ms": 98.82942800004457,
+        "p99_ms": 104.0805420000197
+      },
+      "process_peaks_including_warmup": {
+        "rss_kib": 12708,
+        "threads": 20,
+        "fds": 37
+      },
+      "synthetic_backend": {
+        "measured_requests": 2048,
+        "measured_new_connections": 0,
+        "total_connections": 8,
+        "peak_inflight": 8
+      }
+    }
+  ],
+  "scope": "2026-09-23 candidate with active/upload/page byte limits and 128 default HTTP connections; same benchmark settings as first round, run on a different day. Not a controlled before/after comparison."
+}

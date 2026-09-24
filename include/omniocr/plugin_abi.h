@@ -8,6 +8,7 @@
 extern "C" {
 #endif
 #define OMNIOCR_PLUGIN_ABI_V1 1u
+#define OMNIOCR_PLUGIN_ABI_V2 2u
 typedef struct omniocr_plugin_api_v1 {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -25,6 +26,18 @@ typedef struct omniocr_plugin_api_v1 {
 } omniocr_plugin_api_v1;
 /* Required dlopen symbol; returned descriptor remains valid until dlclose. */
 typedef const omniocr_plugin_api_v1* (*omniocr_plugin_entry_v1_fn)(void);
+/* Optional native batch extension. The v1 prefix and entrypoint remain valid
+ * for existing plugins; v2 plugins export omniocr_plugin_entry_v2 instead. */
+typedef struct omniocr_plugin_api_v2 {
+    omniocr_plugin_api_v1 base;
+    /* request: {"requests":[{image,width,height,prompt},...]};
+     * success response: {"results":[JSON value per request in order]}.
+     * Buffers use base.release and the same error contract as base.execute. */
+    int (*execute_batch)(void* instance, const char* request, size_t request_length,
+                         char** output, size_t* output_length,
+                         char** error, size_t* error_length);
+} omniocr_plugin_api_v2;
+typedef const omniocr_plugin_api_v2* (*omniocr_plugin_entry_v2_fn)(void);
 #ifdef __cplusplus
 }
 #endif

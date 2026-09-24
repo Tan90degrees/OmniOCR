@@ -19,6 +19,17 @@ def graph(path, shape, data):
     onnx.save(model, path)
 
 
+def batch_graph(path, batch):
+    dimension = batch if batch else 'dynamic_batch'
+    value = helper.make_tensor_value_info('logits', TensorProto.FLOAT, [dimension, 4, 3])
+    output = helper.make_tensor_value_info('output', TensorProto.FLOAT, [dimension, 4, 3])
+    model = helper.make_model(helper.make_graph(
+        [helper.make_node('Identity', ['logits'], ['output'])], 'batch_fixture', [value], [output]),
+        opset_imports=[helper.make_opsetid('', 13)], ir_version=8)
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+
+
 def run(binary):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -40,12 +51,59 @@ def run(binary):
                         '--output', str(root / 'out')], cwd='/', check=True, timeout=30)
         result = json.loads((root / 'out/result.json').read_text())
         assert result['pages'][0]['blocks'][0]['text'] == 'A中'
+        # One configured instance can expose several independent local engine
+        # handles to parallel page workers (these each load their own weights).
+        config['models']['recognizer'].update(instances=1, max_concurrent_requests=3)
+        (root / 'config.json').write_text(json.dumps(config))
+        jobs = {'options': {'page_workers': 3, 'max_active_documents': 3,
+                            'max_queued_pages': 3},
+                'jobs': [{'input': str(root / 'image.ppm'),
+                          'output': str(root / f'parallel-{i}')} for i in range(3)]}
+        (root / 'jobs.json').write_text(json.dumps(jobs))
+        subprocess.run([binary, '--config', str(root / 'config.json'), '--batch', str(root / 'jobs.json')],
+                       check=True, timeout=30)
+        for job in jobs['jobs']:
+            assert json.loads((Path(job['output']) / 'result.json').read_text())['pages'][0]['blocks'][0]['text'] == 'A中'
         config['models']['recognizer']['preprocess']['width'] = 3
         (root / 'config.json').write_text(json.dumps(config))
         failure = subprocess.run([binary, '--config', str(root / 'config.json'), '--input', str(root / 'image.ppm'),
                                   '--output', str(root / 'bad')], capture_output=True, timeout=30)
         assert failure.returncode == 1 and b'shape mismatch' in failure.stderr
-    print('PASS: native C++ ONNX layout, CTC recognition, relative paths and shape validation')
+        logits = [0,1,0, 0,1,0, 1,0,0, 0,0,1]
+        batch_graph(root/'dynamic.onnx', 0)
+        batch_graph(root/'static4.onnx', 4)
+        boxes = [{'type': 'text', 'bbox': [0,0,1,1]} for _ in range(4)]
+        batched = {'version': 1, 'execution': {'workers': 4},
+            'layout': {'provider': 'normalized', 'model': 'layout', 'coordinates': 'normalized'},
+            'models': {'layout': {'backend': 'mock', 'response': {'boxes': boxes}},
+                'ocr': local('dynamic.onnx', {'type': 'ctc', 'vocabulary': ['', 'A', '中']})},
+            'routes': {'text': {'model': 'ocr'}}}
+        batched['models']['ocr']['inputs'] = [{'name': 'logits', 'source': 'constant',
+            'shape': [1,4,3], 'data': logits}]
+        batched['models']['ocr'].update(batch_size=4, max_batch_wait_ms=100)
+        (root/'config.json').write_text(json.dumps(batched))
+        subprocess.run([binary, '--config', str(root/'config.json'), '--input', str(root/'image.ppm'),
+                        '--output', str(root/'dynamic')], check=True, timeout=30)
+        result = json.loads((root/'dynamic/result.json').read_text())
+        assert [block['text'] for block in result['pages'][0]['blocks']] == ['A中'] * 4
+        # A static exported batch of four must also accept a one-item tail.
+        batched['models']['ocr']['path'] = 'static4.onnx'
+        batched['models']['layout']['response']['boxes'] = boxes[:1]
+        (root/'config.json').write_text(json.dumps(batched))
+        subprocess.run([binary, '--config', str(root/'config.json'), '--input', str(root/'image.ppm'),
+                        '--output', str(root/'static')], check=True, timeout=30)
+        result = json.loads((root/'static/result.json').read_text())
+        assert result['pages'][0]['blocks'][0]['text'] == 'A中'
+        batched['models']['ocr']['path'] = 'rec.onnx'
+        (root/'config.json').write_text(json.dumps(batched))
+        failure = subprocess.run([binary, '--config', str(root/'config.json'), '--validate'],
+                                 capture_output=True, timeout=30)
+        # Validation checks JSON; native shape compatibility is checked at model construction.
+        assert failure.returncode == 0
+        failure = subprocess.run([binary, '--config', str(root/'config.json'), '--input', str(root/'image.ppm'),
+                                  '--output', str(root/'bad-batch')], capture_output=True, timeout=30)
+        assert failure.returncode == 1 and b'static input batch dimension' in failure.stderr
+    print('PASS: native ONNX layout/CTC, parallel handles, full dynamic batch, static padded tail and shape validation')
 
 
 if __name__ == '__main__':

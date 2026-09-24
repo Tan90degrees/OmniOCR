@@ -2,13 +2,17 @@
 
 [项目首页](../README.md) · [文档目录](README.md)
 
-配置采用 JSON，支持兼容的 `version: 1` 和新增 `version: 2`（执行池、模型绑定、pipeline 分离）。v2 示例及 PP-DocLayoutV3 多边形/可选阅读顺序、外部 C ABI 插件见 [插件与 V3 专题](plugins.md)。其余字段说明中的旧式布局依然适用于 v1。模型路径、字典路径相对于配置文件；输入和输出路径相对于调用者工作目录。
+配置采用 JSON，支持兼容的 `version: 1` 和新增 `version: 2`（执行池、模型绑定、pipeline 分离）。v2 示例及 PP-DocLayoutV3 多边形/可选阅读顺序、外部 C ABI 插件见 [插件与 V3 专题](plugins.md)。其余字段说明中的旧式布局依然适用于 v1。模型、字典、`server.data_dir` 和 `server.allowed_input_root` 的相对路径以配置文件为基准；待处理文件和输出目录仍以调用者工作目录为基准。
 
 ## 顶层配置
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `execution.workers` | 4 | 每次文档处理的 BOX 线程上限，范围 1–128 |
+| `execution.workers` | 4 | 单文件 CLI 的 BOX 线程数；也是批处理/REST 的页面线程数回退值，范围 1–128 |
+| `execution.page_workers` | `execution.workers` | REST 和批处理共享的页面线程数，范围 1–128 |
+| `execution.box_workers` | 1 | REST 和批处理共享的 BOX 线程数，范围 1–128 |
+| `execution.document_workers` | 2 | 同时读取/转换的文档数，范围 1–32 |
+| `execution.max_queued_pages` | 2 | 待处理页面队列长度，范围 1–256 |
 | `execution.on_error` | `fail` | `fail` 或 `record`，仅控制 BOX 错误 |
 | `document.dpi` | 150 | PDF 渲染分辨率请求；像素上限会约束最终分辨率 |
 | `document.max_pixels` | 40000000 | 图片最大像素数；PDF 最大边长设为其平方根 |
@@ -27,6 +31,8 @@
 | `layout.max_boxes` | 2000 | 单页 BOX 数上限 |
 | `layout.score_threshold` | 0 | 置信度过滤阈值 |
 
+服务专属的 `server` 配置可设置 `data_dir`、`allowed_input_root`、`host`、`port`、`api_key_env`、`max_upload_bytes`、`max_jobs`、`max_active_jobs`、`max_inflight_upload_bytes`、`max_queued_page_bytes`、`http_connections`、`connection_timeout_seconds`、`max_result_bytes` 和 `max_asset_bytes`。范围、启动样例和安全边界见[REST 服务](server.md#构建及启动)。批处理清单的 `options` 可覆盖 `execution` 中对应的调度设置；服务启动参数可覆盖配置文件。三种模式均复用模型池参数和 BOX 路由，无需改代码。未识别的 `execution`/`server` 键或越界值会在启动前报错。配置在进程启动时读取，修改工作线程数或模型实例数后须重启服务。
+
 `routes` 的键是经过 type_map 的类型名；`*` 是兜底。未命中且无兜底时按 on_error 处理。每个 route 的 `action` 默认为 `recognize`，须在 `model`（单个模型 ID）和 `models`（非空、不可重复的模型 ID 数组）中**二选一**；可设置 route 级 `prompt` 和 `save_crop`。`image` 只保存裁剪，`skip` 跳过识别但仍在 JSON 保留 BOX。
 
 `models` 按给定顺序尝试推理；仅在模型推理/结果格式异常时切换到下一个模型，成功后记录实际使用的模型 ID。所有候选都失败时，`on_error: record` 保留 BOX 和包含候选模型错误的 `error`；`on_error: fail` 抛错。同一模型 ID 无论在多少种 BOX 的候选列表中引用，都复用同一个有界实例池；候选模型池会在 Pipeline 初始化时全部创建，因此配置本地 OM 模型时要预留各候选实例的设备内存。建议将该机制用于主备模型容错，而不是将任意错误隐式掩盖。
@@ -41,9 +47,32 @@
 
 ## 模型池
 
-`instances` 默认 1，范围 1–128；`acquire_timeout_ms` 默认 60000。实例只被一个调用独占使用。总模型内存近似为各本地模型的 `instances × 单实例内存` 之和，不能把增大实例数当成免费并发。对 ACL，`device_ids: [0,1]` 按实例序号轮转分配设备。
+`instances` 默认 1，范围 1–128；`max_concurrent_requests` 默认等于 `instances`，范围 1–128，控制此模型 ID **同时在途的后端调用数**；`acquire_timeout_ms` 默认 60000。比如一套已部署的 vLLM 权重用 `instances: 1, max_concurrent_requests: 8`，框架建立 8 个可复用的 HTTP 客户端，同时最多发出 8 个请求，远端模型仍只有一套。小于 `instances` 时只启用前若干槽位；大于 `instances` 时为每个额外槽位构建独立模型句柄，以免一个句柄被并发访问。**本地 ACL/ONNX 及外部插件可能因此加载额外权重和设备缓冲**，资源须按 `max(instances, max_concurrent_requests)` 个句柄预算；不支持共享一个不可重入的本地推理句柄。对 ACL，`device_ids: [0,1]` 按句柄序号轮转分配设备。
 
-vLLM/HTTP 的 `instances` 是请求槽位，不能创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。
+每个模型 ID（v2 为每个 `executor`）独立设置 `batch_size`，默认 1，范围 1–128；大于 1 时启用全 Pipeline 共享的组批队列，同一模型来自**不同文件、页面和 BOX 类型**的请求可进入一批。`max_batch_wait_ms` 默认 5、范围 0–1000：从队首请求到达起最多等待该时间，达到批大小则立即执行，尾批到时执行；必须小于 `acquire_timeout_ms`。`max_pending_requests` 默认 256，至少等于 `batch_size`，排满或排队超时都会明确失败；候选模型可按原路由规则回退。`max_concurrent_requests` 控制并行批次数上限，每个活跃槽位执行一次原生批量调用；结果按提交顺序归还给原 BOX，文档输出仍按页号和阅读顺序排列。
+
+`instance_overrides` 可按活跃槽位编号覆盖 `batch_size` 和 `max_batch_wait_ms`，数组第 0 项对应实例 0，未列出的实例继承模型级设置。所有实例从**同一个模型 ID 的全局 BOX 队列**取任务；空闲实例按各自的批大小取队首请求，达到其窗口时执行尾批，避免预先将 BOX 固定分片到繁忙实例。队列上限至少覆盖模型级与各实例设置中最大的批大小；静态 batch ONNX/ACL 权重必须与相应实例的设置匹配，不同尺寸的实例要有相容的模型形状。`batch_size: 1` 的槽位直接执行单条推理。若所有实例都设为 1，沿用无后台组批线程的有界 FIFO 实例租赁路径。全局队列不会越过 `box_workers` 的输入并发上限，实测时须同时配置该值。
+
+只有支持一次真实批量调用的后端接受 `batch_size>1`：ONNX、导出固定 batch 的 ACL OM、带显式 `batch_endpoint` 的 `http_json`、mock 及实现批量入口的 C ABI v2 插件。无批量能力的 C ABI v1/C++ 后端在初始化时报错，不会在组批后逐条串行执行。`vllm` 的 Chat Completions 单请求协议不接受一次多图多任务批量调用；请保持框架 `batch_size=1`，用 `max_concurrent_requests` 向同一服务发出并发请求，在 vLLM 服务中配置其自身的连续批处理容量。组批窗口会增加低负载单请求延迟；批大小也不是并发槽位或 vLLM `max_num_seqs` 的别名。
+
+一次底层批量推理整体失败时，该批次内所有请求收到同一个模型错误，按各自 BOX 的候选模型或 `on_error` 策略处理；不会自动重试整个批次，以免重复执行外部推理。部署前应验证模型能接受批内不同文件的输入与 prompt，并单独测高低负载下的吞吐、P95/P99 和内存占用。
+
+```json
+"models": {
+  "ocr": {
+    "backend": "http_json", "endpoint": "http://127.0.0.1:8001/infer",
+    "batch_endpoint": "http://127.0.0.1:8001/batch",
+    "instances": 2, "max_concurrent_requests": 4,
+    "batch_size": 8, "max_batch_wait_ms": 10,
+    "instance_overrides": [{"batch_size": 4, "max_batch_wait_ms": 5}, {}],
+    "max_pending_requests": 256
+  }
+}
+```
+
+在 v2 配置中把相同参数写到 `executors.<id>`，多个 model binding 共用这一批队列。原有 v2 `max_inflight` 仍映射到 `instances`，可以另设 `max_concurrent_requests` 调整实际在途上限。将不同任务绑定到同一执行池前须确认该模型、prompt 与返回协议兼容。
+
+vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 每个槽位复用自己的连接，不在多个线程同时使用同一客户端；实际在途上限还受 REST 的 `--box-workers`（默认 1）或批处理的 `options.box_workers`、BOX 数及后端自身容量约束。单文件 CLI 使用 `execution.workers`，详见 [并发与性能](performance.md)。
 
 ## vLLM
 
@@ -72,6 +101,8 @@ Paddle 布局返回：
 也支持 `{"res":{"boxes":[...]}}`。字段对齐 [PaddleOCR 布局结果](https://www.paddleocr.ai/latest/en/version3.x/module_usage/layout_detection.html)。`tools/paddle_layout_server.py` 提供可选桥接。V2 的排序输出须由实际 Paddle pipeline 保留；框架不凭检测类别推断顺序。
 
 自定义服务也可返回 `normalized` 布局：`{"boxes":[{"type":"text","bbox":[...],"order":0}]}`。识别服务返回 `{"text":"..."}`。
+
+可选批量端点采用 `POST batch_endpoint`：请求 `{"requests":[{"image":"data:image/png;base64,...","width":1000,"height":1400,"prompt":"..."},...]}`；响应 `{"results":[{"text":"..."},...]}`，结果个数和顺序必须与请求一致。布局返回的每个 `results` 元素仍使用单张布局格式。服务必须真正按 batch 推理；若只在服务端循环调用单张模型，虽然协议可用，却没有原生 batch 加速。
 
 ### 启动 Paddle 桥接服务
 
@@ -102,6 +133,8 @@ python tools/paddle_layout_server.py --model PP-DocLayoutV2 --device cpu --port 
 | `scale_factor` | `[1,2]`，`[目标H/原H,目标W/原W]` |
 | `constant` | 显式 `shape` 和 `data` |
 
+启用批量时，每个输入必须有前导 batch 维度 1；框架逐样本完成预处理，然后沿第 0 维拼接。ONNX 可以使用动态 batch 维，也可以导出固定 batch；ACL 当前只支持与 `batch_size` 相同的静态 batch OM，不支持动态 batch OM。固定 batch 尾批复制最后一张输入凑足模型形状，推理后丢弃填充项结果，因此实际执行的输入数可能超过有效请求数；需用真实权重验证该填充不会改变其他样本输出。其他维度、输入名称、dtype 必须一致；不自动实现 AIPP、不同 shape 的分桶或多档 OM。
+
 例如某模型 `im_shape` 期望的是 resize 后的形状，应使用 constant `[H,W]`；不要仅凭输入名字误选 original_shape。
 
 ### 输出
@@ -109,6 +142,8 @@ python tools/paddle_layout_server.py --model PP-DocLayoutV2 --device cpu --port 
 `decoder.type: paddle_layout` 选择 float32 `[N,6]` 输出，每行 `[class_id,score,x1,y1,x2,y2]`；`output_index` 默认 0。`labels` 必须逐项对应模型类别；`coordinates` 为 `pixel` 表示原图坐标，为 `input` 表示 resize 后坐标。该适配要求模型已输出检测框，**不包含通用 RT-DETR 原始 logits/bbox 解码、NMS、V2 指针排序网络**。
 
 `decoder.type: ctc` 选择 `[1,T,C]` float32 logits/概率。提供 `vocabulary` 数组或 UTF-8 `dictionary` 文件（每行一个 token），词表必须包括 blank 位置且条目数等于 C；`blank_index` 默认 0。例如首行空行代表 blank，不自动添加空格类。解码执行 argmax、去重复和去 blank。
+
+批量模型的 CTC 输出须为 `[B,T,C]`，布局为 `[B,N,6]`；按有效样本拆成已有的单张解码器格式。输出不是这种形状（例如变长框表 + `bbox_num`、原始 RT-DETR 多头输出）需要专用模型适配，不能靠 `batch_size` 直接启用。
 
 CTC 通常是文字行识别，不能把多行段落 BOX 直接缩成一行就当成完整 OCR。段落宜路由到 VLM，或为指定模型增加“文本行检测 → 行识别 → 汇总”的适配器。示例 `paddle-local.json` 用来展示混合后端路由，实际投入使用前要确认你的 BOX 与模型输入语义一致。
 

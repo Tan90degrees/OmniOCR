@@ -32,7 +32,7 @@ flowchart TD
 
 `models` 定义模型池，`layout.model` 选择版面模型，`routes` 按 BOX 类型选择模型或执行保存图片、跳过识别等动作。多个类型引用**同一个模型 ID** 就共享实例池；不同 ID 即使指向同一文件也会分别加载。
 
-本地 OM/ONNX 的 `instances` 是加载的实例数；vLLM/HTTP 的 `instances` 是客户端在途请求槽位，服务端副本需要自行部署。详见 [配置与模型适配](docs/configuration.md)。
+每个模型可独立设置 `max_concurrent_requests`（默认等于 `instances`）和 `batch_size`。例如一套 vLLM 服务使用 `instances: 1, max_concurrent_requests: 8` 可同时接收 8 个后端请求；本地 OM/ONNX 的额外并发槽位会加载额外模型句柄，须规划设备内存。详见 [配置与模型适配](docs/configuration.md)。
 
 ## 支持的文件
 
@@ -102,7 +102,7 @@ ctest --test-dir build --output-on-failure
 | 运行中持续提交文件 | [REST 服务](docs/server.md) | 路径提交或原始二进制上传，异步查询状态与结果 |
 | 嵌入 C++ 应用 | [C++ 集成](docs/architecture.md#c-集成) | 复用 Pipeline，或扩展 Model / TensorEngine |
 
-优先级作用于已就绪页面，不抢占正在运行的推理。服务与批处理使用全局页面工作线程，每页 BOX 串行；单文件 CLI 的 BOX 并发由 `execution.workers` 控制。详见 [调度与资源生命周期](docs/architecture.md)。
+优先级作用于已就绪页面，不抢占正在运行的推理。服务与批处理使用全局页面工作线程，在同一配置文件的 `execution.box_workers` 设置共享 BOX 池，`execution.page_workers`、`execution.document_workers` 调整页面和文档并发；模型实例、队列与组批在 `models`（v2 为 `executors`）中配置。单文件 CLI 的 BOX 并发由 `execution.workers` 控制。服务容量在 `server` 配置，详见 [配置参考](docs/configuration.md)和[调度说明](docs/architecture.md)。
 
 ## 文档导航
 
@@ -117,6 +117,7 @@ ctest --test-dir build --output-on-failure
 | [批处理](docs/batch.md) | 任务清单、优先级、并发参数和退出码 |
 | [架构与 C++ 集成](docs/architecture.md) | 模块边界、调度、资源生命周期、扩展接口 |
 | [昇腾部署](docs/ascend.md) | vLLM-Ascend、OM 适配、310P3 记录及已知问题 |
+| [并发与性能](docs/performance.md) | 模型级跨文件组批、可复现压测、资源指标与后续路线 |
 | [测试与验证](docs/testing.md) | 测试命令、覆盖范围、实机与准确率验收边界 |
 | [x64 / ARM64 离线包](packaging/README.md) | 双架构构建、各自下载/验证及 SDK、转换器依赖 |
 

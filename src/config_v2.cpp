@@ -16,6 +16,7 @@ Json normalize_config(const Json& config) {
     Json normalized={{"version",1},{"models",Json::object()}};
     if (config.contains("plugins")) normalized["plugins"]=config.at("plugins");
     if (config.contains("execution")) normalized["execution"]=config.at("execution");
+    if (config.contains("server")) normalized["server"]=config.at("server");
     if (config.contains("document")) normalized["document"]=config.at("document");
     if (config.contains("output")) normalized["output"]=config.at("output");
     for (const auto& [id, executor] : executors.items()) {

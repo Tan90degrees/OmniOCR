@@ -1,5 +1,6 @@
 #include "omniocr/core.hpp"
 #include "omniocr/plugins.hpp"
+#include <algorithm>
 #include <fstream>
 #include <cstdint>
 #include <cmath>
@@ -28,6 +29,17 @@ void positive(const Json& j, const char* key, int fallback, int max) {
                 std::string(key) + " out of range");
     }
 }
+void bounded(const Json& j, const char* key, uint64_t low, uint64_t high) {
+    if (!j.contains(key)) return;
+    const auto& value = j.at(key);
+    require(value.is_number_integer() || value.is_number_unsigned(),
+            std::string(key) + " must be an integer");
+    if (value.is_number_unsigned())
+        require(value.get<uint64_t>() >= low && value.get<uint64_t>() <= high,
+                std::string(key) + " out of range");
+    else require(value.get<int64_t>() >= 0 && uint64_t(value.get<int64_t>()) >= low &&
+                 uint64_t(value.get<int64_t>()) <= high, std::string(key) + " out of range");
+}
 }
 void validate_config(const Json& c) {
     if (c.is_object() && c.contains("version") && c.at("version") == 2) {
@@ -42,7 +54,47 @@ void validate_config(const Json& c) {
     for (const auto& [id, m] : models.items()) {
         require(!id.empty(), "empty model ID");
         positive(m, "instances", 1, 128);
+        positive(m, "max_concurrent_requests", m.value("instances", 1), 128);
         positive(m, "acquire_timeout_ms", 60000, 3600000);
+        positive(m, "batch_size", 1, 128);
+        positive(m, "max_pending_requests", 256, 100000);
+        const auto batch_size = m.value("batch_size", 1);
+        int wait = 5;
+        if (m.contains("max_batch_wait_ms")) {
+            const auto& value = m.at("max_batch_wait_ms");
+            require(value.is_number_integer() || value.is_number_unsigned(),
+                    "max_batch_wait_ms must be an integer");
+            if (value.is_number_unsigned())
+                require(value.get<uint64_t>() <= 1000, "max_batch_wait_ms out of range");
+            else require(value.get<int64_t>() >= 0 && value.get<int64_t>() <= 1000,
+                         "max_batch_wait_ms out of range");
+            wait = value.get<int>();
+        }
+        const auto overrides = m.value("instance_overrides", Json::array());
+        require(overrides.is_array() && overrides.size() <= size_t(m.value("max_concurrent_requests", m.value("instances", 1))),
+                "instance_overrides must be an array no longer than max_concurrent_requests");
+        bool needs_batch = batch_size > 1;
+        int largest_batch = batch_size;
+        for (const auto& slot : overrides) {
+            require(slot.is_object(), "instance override must be an object");
+            for (const auto& [key, value] : slot.items())
+                require(key == "batch_size" || key == "max_batch_wait_ms", "unknown instance override: " + key);
+            positive(slot, "batch_size", batch_size, 128);
+            const auto size = slot.value("batch_size", batch_size);
+            const auto window = slot.value("max_batch_wait_ms", wait);
+            require(!slot.contains("max_batch_wait_ms") ||
+                    (slot.at("max_batch_wait_ms").is_number_integer() || slot.at("max_batch_wait_ms").is_number_unsigned()),
+                    "instance max_batch_wait_ms must be an integer");
+            require(window >= 0 && window <= 1000, "instance max_batch_wait_ms out of range");
+            if (size > 1) require(window < m.value("acquire_timeout_ms", 60000),
+                                  "instance max_batch_wait_ms must be less than acquire_timeout_ms");
+            needs_batch |= size > 1;
+            largest_batch = std::max(largest_batch, size);
+        }
+        require(m.value("max_pending_requests", 256) >= largest_batch,
+                "max_pending_requests must be at least the largest instance batch_size");
+        if (batch_size > 1) require(wait < m.value("acquire_timeout_ms", 60000),
+                                    "max_batch_wait_ms must be less than acquire_timeout_ms");
         const auto backend = m.at("backend").get<std::string>();
         require(has_backend(backend), "unknown backend plugin " + backend);
         if (backend == "vllm" || backend == "http_json") {
@@ -52,6 +104,13 @@ void validate_config(const Json& c) {
             positive(m, "connect_timeout_seconds", 10, 3600);
             positive(m, "max_response_bytes", 16777216, 268435456);
             if (backend == "vllm") require(!m.at("model").get<std::string>().empty(), "missing served model name");
+            if (backend == "vllm") require(!needs_batch,
+                "vLLM chat API has no native batch request; configure batching in vLLM serving instead");
+            if (backend == "http_json" && needs_batch) {
+                const auto endpoint = m.at("batch_endpoint").get<std::string>();
+                require(endpoint.rfind("http://", 0) == 0 || endpoint.rfind("https://", 0) == 0,
+                        "batch_endpoint must be an HTTP(S) URL");
+            }
         }
         if (backend == "onnx" || backend == "acl") {
             require(!m.at("path").get<std::string>().empty(), "missing model path");
@@ -153,8 +212,40 @@ void validate_config(const Json& c) {
                 "output.schema_version must be integer 1 or 2");
     }
     const auto exec = c.value("execution", Json::object());
+    require(exec.is_object(), "execution must be an object");
+    for (const auto& [key, value] : exec.items())
+        require(std::set<std::string>{"workers", "page_workers", "box_workers", "document_workers",
+                                      "max_queued_pages", "on_error"}.count(key), "unknown execution setting: " + key);
     positive(exec, "workers", 4, 128);
+    positive(exec, "page_workers", exec.value("workers", 4), 128);
+    positive(exec, "box_workers", 1, 128);
+    positive(exec, "document_workers", 2, 32);
+    positive(exec, "max_queued_pages", 2, 256);
     require(exec.value("on_error", "fail") == "fail" || exec.value("on_error", "fail") == "record", "invalid on_error");
+    const auto server = c.value("server", Json::object());
+    require(server.is_object(), "server must be an object");
+    for (const auto& [key, value] : server.items())
+        require(std::set<std::string>{"data_dir", "allowed_input_root", "host", "port", "api_key_env",
+                                      "max_upload_bytes", "max_jobs", "max_active_jobs",
+                                      "max_inflight_upload_bytes", "max_queued_page_bytes", "http_connections",
+                                      "connection_timeout_seconds", "max_result_bytes", "max_asset_bytes"}.count(key),
+                "unknown server setting: " + key);
+    for (const auto* key : {"data_dir", "allowed_input_root", "api_key_env"})
+        if (server.contains(key)) require(server.at(key).is_string() &&
+            !server.at(key).get<std::string>().empty(), std::string("server.") + key + " must be a nonempty string");
+    if (server.contains("host")) require(server.at("host").is_string() &&
+        (server.at("host") == "127.0.0.1" || server.at("host") == "0.0.0.0"),
+        "server.host must be 127.0.0.1 or 0.0.0.0");
+    bounded(server, "port", 1, 65535);
+    bounded(server, "max_upload_bytes", 1, 512ULL * 1024 * 1024);
+    bounded(server, "max_jobs", 1, 100000);
+    bounded(server, "max_active_jobs", 1, 100000);
+    bounded(server, "max_inflight_upload_bytes", 1, 1ULL << 40);
+    bounded(server, "max_queued_page_bytes", 1, 1ULL << 40);
+    bounded(server, "http_connections", 16, 1024);
+    bounded(server, "connection_timeout_seconds", 1, 3600);
+    bounded(server, "max_result_bytes", 1, 1ULL << 40);
+    bounded(server, "max_asset_bytes", 1, 1ULL << 40);
     const auto doc = c.value("document", Json::object());
     positive(doc, "dpi", 150, 1200);
     positive(doc, "max_pages", 1000, 100000);
@@ -183,6 +274,10 @@ Json load_config(const fs::path& path) {
     }
     c = normalize_config(c);
     validate_config(c);
+    if (c.contains("server"))
+        for (const char* key : {"data_dir", "allowed_input_root"})
+            if (c["server"].contains(key)) c["server"][key] =
+                fs::absolute(path.parent_path() / c["server"][key].get<std::string>()).string();
     // Model assets are resolved relative to the config, never the process cwd.
     for (auto& m : c["models"]) {
         if (m.contains("path")) m["path"] = fs::absolute(path.parent_path() / m["path"].get<std::string>()).string();

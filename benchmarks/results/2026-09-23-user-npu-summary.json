@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source": "User-provided performance verification report, 2026-09-23",
+  "provenance": "Aggregate figures transcribed from the user's report; not independently reproduced from raw run artifacts.",
+  "workload": {
+    "dataset": "OmniDocBench",
+    "images": 40,
+    "client_concurrency": 8,
+    "backends": ["ACL", "vLLM"]
+  },
+  "baseline": {
+    "commit": "bc13bb6245118120044d9d3f368eb1ee5455d1a0",
+    "succeeded": 40,
+    "throughput_images_per_minute": 16.5,
+    "mean_completion_seconds": 26.8,
+    "p50_completion_seconds": 25.1,
+    "p95_completion_seconds": 65.7,
+    "total_blocks": 266
+  },
+  "candidate": {
+    "commit": "29a4eb2251a765a03629b26b40042c7b9c692ae4",
+    "succeeded": 40,
+    "throughput_images_per_minute": 16.3,
+    "mean_completion_seconds": 27.2,
+    "p50_completion_seconds": 25.1,
+    "p95_completion_seconds": 65.7,
+    "total_blocks": 266
+  },
+  "reported_checks": ["Current build completed", "Unit tests passed", "No server errors reported"],
+  "missing_for_independent_verification": [
+    "Per-image input manifest, hashes and output comparison",
+    "Per-request latency and timestamp records",
+    "Number of repeated runs and run order",
+    "Host and NPU model, CANN, drivers, CPU and memory",
+    "Model weights, vLLM and ACL configuration hashes",
+    "Per-stage queue, conversion, model wait and inference durations"
+  ],
+  "interpretation": "Single user-reported aggregate run; differences cannot be labeled statistical noise or attributed solely to this PR. Equal total block counts do not establish identical OCR output."
+}
