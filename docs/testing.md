@@ -60,7 +60,7 @@ done
 
 ## 实机与发布验收
 
-用户已报告 310P3 上 DocLayout OM + OvisOCR2 的真实 OCR 链路及服务模式跑通；这不等于其他权重、设备、驱动/CANN 组合已经验收。ACL 退出 SIGSEGV 由 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 跟踪，正常退出与资源回收仍需验证。
+用户已报告 310P3 上 DocLayout OM + OvisOCR2 的真实 OCR 链路及服务模式跑通，异步流可用，早先报告的退出 139 在最新测试中未再出现；具体退出码、重复轮次和资源回收记录尚未提供。这不等于其他权重、设备、驱动/CANN 组合已经验收。历史记录见 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2)。
 
 另有用户提供的 [40 张 OmniDocBench、8 并发 ACL + vLLM 初测汇总](performance.md)：两版均完成 40/40，尚缺逐图记录、重复轮次和输出对比，因此不能代替质量与统计稳定性验收。
 

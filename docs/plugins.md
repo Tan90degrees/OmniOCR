@@ -52,4 +52,4 @@ Paddle 环境必须安装经验证的匹配版本并固定权重 revision、预�
 
 ## 验收与当前范围
 
-CI 应分别证明：旧 v1 配置/输出不退化、V3 的 null/缺失 order 与原始索引、轮廓和裁剪一致、explicit transform、无效/退化 polygon 被拒绝、JSON v2 不丢信息、外部 C ABI 在 CLI/batch/REST 都可用。本地测试并不替代真实 V3 权重、MinerU、动态 OM、310P3/910B 的兼容性与长稳测试；已有 ACL 退出 SIGSEGV 继续由 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 单独跟踪。
+CI 应分别证明：旧 v1 配置/输出不退化、V3 的 null/缺失 order 与原始索引、轮廓和裁剪一致、explicit transform、无效/退化 polygon 被拒绝、JSON v2 不丢信息、外部 C ABI 在 CLI/batch/REST 都可用。本地测试并不替代真实 V3 权重、MinerU、动态 OM、310P3/910B 的兼容性与长稳测试；历史 ACL 退出 SIGSEGV 见 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2)，用户最新测试未再复现。
