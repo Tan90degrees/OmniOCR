@@ -8,7 +8,7 @@
 
 | 入口 | 覆盖内容 | 条件与边界 |
 |---|---|---|
-| `ctest` | 核心逻辑、共享实例池、并发组批/尾批/排队超时、HTTP 连接复用、fallback、输出解码 | HTTP 测试使用本地模拟服务；需 Python 3 才会注册 Python 集成项 |
+| `ctest` | 核心逻辑、共享实例池、并发组批/尾批/排队超时、ACL stream 调用顺序/锁页缓冲/并行句柄/异常回收、HTTP 连接复用、fallback、输出解码 | ACL 测试使用仓库内的模拟 SDK，无 NPU 吞吐或精度结论；HTTP 测试使用本地模拟服务 |
 | [document_integration.py](../tests/document_integration.py) | 六种 Office 格式、12 页 PDF、页序和转换失败 | 真实 LibreOffice/Poppler，Mock 模型 |
 | [input_formats_integration.py](../tests/input_formats_integration.py) | RTF、ODF、HTML、CSV、TIFF、EPUB/OFD、限制与混合批次 | `--external` 要求真实 Calibre/OFD；Mock 模型 |
 | [onnx_integration.py](../tests/onnx_integration.py) | ONNX Runtime、额外并发句柄、动态 batch、固定 batch 尾批填充、CTC 与形状拒绝 | 实际执行生成的小图，不评估 OCR 精度 |

@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <cstring>
 
 namespace omniocr {
 namespace {
@@ -45,15 +46,31 @@ struct Dataset {
     }
     ~Dataset() { aclmdlDestroyDataset(data); }
 };
+struct HostBuffer {
+    void* ptr = nullptr;
+    explicit HostBuffer(size_t bytes) {
+        if (!bytes) throw std::runtime_error("zero-size ACL host buffer");
+        check(aclrtMallocHost(&ptr, bytes), "aclrtMallocHost");
+    }
+    ~HostBuffer() { if (ptr) aclrtFreeHost(ptr); }
+};
 class AclEngine final : public TensorEngine {
     aclrtContext context_ = nullptr;
     uint32_t model_id_ = 0;
     bool loaded_ = false;
     aclmdlDesc* desc_ = nullptr;
     std::unique_ptr<Dataset> inputs_, outputs_;
+    aclrtStream stream_ = nullptr;
+    std::vector<std::unique_ptr<HostBuffer>> host_inputs_, host_outputs_;
+    struct InputInfo { std::string name; std::vector<int64_t> shape; };
+    std::vector<InputInfo> input_info_;
     size_t fixed_batch_ = 0;
+    bool async_stream_ = true, stream_failed_ = false;
     void clear() noexcept {
         if (context_) aclrtSetCurrentContext(context_);
+        // Do not release pinned/device buffers while tasks might still use them.
+        if (stream_) { aclrtSynchronizeStream(stream_); aclrtDestroyStream(stream_); stream_ = nullptr; }
+        host_outputs_.clear(); host_inputs_.clear();
         outputs_.reset(); inputs_.reset();
         if (desc_) { aclmdlDestroyDesc(desc_); desc_ = nullptr; }
         if (loaded_) { aclmdlUnload(model_id_); loaded_ = false; }
@@ -61,6 +78,7 @@ class AclEngine final : public TensorEngine {
     }
 public:
     AclEngine(const Json& c, size_t index) {
+        async_stream_ = c.value("acl_async_stream", true);
         const bool batching = c.value("batch_size", 1) > 1;
         const auto devices = c.value("device_ids", std::vector<int>{0});
         if (devices.empty()) throw std::runtime_error("empty ACL device_ids");
@@ -68,6 +86,7 @@ public:
         try {
             runtime().select(device);
             check(aclrtCreateContext(&context_, device), "aclrtCreateContext");
+            if (async_stream_) check(aclrtCreateStream(&stream_), "aclrtCreateStream");
             aclrtRunMode mode;
             check(aclrtGetRunMode(&mode), "aclrtGetRunMode");
             if (mode != ACL_HOST) throw std::runtime_error("initial ACL backend requires host mode");
@@ -89,10 +108,22 @@ public:
                 }
                 for (size_t j = 0; j < dims.dimCount; ++j)
                     if (dims.dims[j] <= 0) throw std::runtime_error("dynamic OM inputs need a model-specific adapter");
-                inputs_->append(aclmdlGetInputSizeByIndex(desc_, i));
+                const auto* name = aclmdlGetInputNameByIndex(desc_, i);
+                if (!name) throw std::runtime_error("ACL input has no name");
+                InputInfo info; info.name = name;
+                for (size_t j = 0; j < dims.dimCount; ++j) info.shape.push_back(dims.dims[j]);
+                input_info_.push_back(std::move(info));
+                const auto bytes = aclmdlGetInputSizeByIndex(desc_, i);
+                inputs_->append(bytes);
+                if (async_stream_) host_inputs_.push_back(std::make_unique<HostBuffer>(bytes));
             }
-            for (size_t i = 0; i < aclmdlGetNumOutputs(desc_); ++i)
-                outputs_->append(aclmdlGetOutputSizeByIndex(desc_, i));
+            for (size_t i = 0; i < aclmdlGetNumOutputs(desc_); ++i) {
+                const auto bytes = aclmdlGetOutputSizeByIndex(desc_, i);
+                outputs_->append(bytes);
+                if (async_stream_ && aclmdlGetOutputDataType(desc_, i) == ACL_FLOAT)
+                    host_outputs_.push_back(std::make_unique<HostBuffer>(bytes));
+                else host_outputs_.push_back(nullptr);
+            }
         } catch (...) { clear(); throw; }
     }
     ~AclEngine() override { clear(); }
@@ -100,21 +131,56 @@ public:
     std::vector<Tensor> run(const std::vector<Tensor>& tensors) override {
         // Leases can move between caller threads; explicitly restore the instance context.
         check(aclrtSetCurrentContext(context_), "aclrtSetCurrentContext");
+        if (stream_failed_) throw std::runtime_error("ACL stream failed; discard this model instance");
         if (tensors.size() != inputs_->buffers.size()) throw std::runtime_error("ACL input count mismatch");
+        // Check every input before enqueueing any work on this instance.
+        std::vector<const Tensor*> ordered;
+        ordered.reserve(input_info_.size());
         for (size_t i = 0; i < tensors.size(); ++i) {
-            const auto* name = aclmdlGetInputNameByIndex(desc_, i);
             const Tensor* tensor = nullptr;
-            for (const auto& t : tensors) if (name && t.name == name) tensor = &t;
-            if (!tensor) throw std::runtime_error("ACL input name not configured: " + std::string(name ? name : "<null>"));
-            aclmdlIODims dims; check(aclmdlGetInputDims(desc_, i, &dims), "aclmdlGetInputDims");
-            if (dims.dimCount != tensor->shape.size()) throw std::runtime_error("ACL input rank mismatch");
-            for (size_t j = 0; j < dims.dimCount; ++j)
-                if (dims.dims[j] != tensor->shape[j]) throw std::runtime_error("ACL input shape mismatch");
+            for (const auto& t : tensors) if (t.name == input_info_[i].name) tensor = &t;
+            if (!tensor) throw std::runtime_error("ACL input name not configured: " + input_info_[i].name);
+            if (input_info_[i].shape != tensor->shape) throw std::runtime_error("ACL input shape mismatch");
             const auto& buffer = inputs_->buffers[i];
             if (buffer->bytes != tensor->data.size() * sizeof(float)) throw std::runtime_error("ACL input byte size mismatch");
-            check(aclrtMemcpy(buffer->ptr, buffer->bytes, tensor->data.data(), buffer->bytes, ACL_MEMCPY_HOST_TO_DEVICE), "aclrtMemcpy H2D");
+            ordered.push_back(tensor);
         }
-        check(aclmdlExecute(model_id_, inputs_->data, outputs_->data), "aclmdlExecute");
+        if (async_stream_) {
+            // One stream per independently leased model ID, with a single
+            // synchronization after H2D, execute and D2H have been queued.
+            bool submitted = false;
+            try {
+                for (size_t i = 0; i < ordered.size(); ++i) {
+                    const auto bytes = inputs_->buffers[i]->bytes;
+                    std::memcpy(host_inputs_[i]->ptr, ordered[i]->data.data(), bytes);
+                    submitted = true;
+                    check(aclrtMemcpyAsync(inputs_->buffers[i]->ptr, bytes, host_inputs_[i]->ptr,
+                                           bytes, ACL_MEMCPY_HOST_TO_DEVICE, stream_), "aclrtMemcpyAsync H2D");
+                }
+                check(aclmdlExecuteAsync(model_id_, inputs_->data, outputs_->data, stream_), "aclmdlExecuteAsync");
+                for (size_t i = 0; i < outputs_->buffers.size(); ++i)
+                    if (host_outputs_[i]) {
+                        const auto bytes = outputs_->buffers[i]->bytes;
+                        check(aclrtMemcpyAsync(host_outputs_[i]->ptr, bytes, outputs_->buffers[i]->ptr,
+                                               bytes, ACL_MEMCPY_DEVICE_TO_HOST, stream_), "aclrtMemcpyAsync D2H");
+                    }
+                const auto rc = aclrtSynchronizeStream(stream_);
+                submitted = false;
+                if (rc != ACL_SUCCESS) { stream_failed_ = true; check(rc, "aclrtSynchronizeStream"); }
+            } catch (...) {
+                // A failed enqueue may leave earlier tasks in flight. Keep
+                // their buffers alive until the stream has drained.
+                if (submitted && aclrtSynchronizeStream(stream_) != ACL_SUCCESS) stream_failed_ = true;
+                throw;
+            }
+        } else {
+            for (size_t i = 0; i < ordered.size(); ++i) {
+                const auto bytes = inputs_->buffers[i]->bytes;
+                check(aclrtMemcpy(inputs_->buffers[i]->ptr, bytes, ordered[i]->data.data(),
+                                  bytes, ACL_MEMCPY_HOST_TO_DEVICE), "aclrtMemcpy H2D");
+            }
+            check(aclmdlExecute(model_id_, inputs_->data, outputs_->data), "aclmdlExecute");
+        }
         std::vector<Tensor> result;
         for (size_t i = 0; i < outputs_->buffers.size(); ++i) {
             Tensor t;
@@ -128,8 +194,9 @@ public:
             }
             if (aclmdlGetOutputDataType(desc_, i) == ACL_FLOAT) {
                 t.data.resize(count);
-                check(aclrtMemcpy(t.data.data(), count * sizeof(float), outputs_->buffers[i]->ptr,
-                                 count * sizeof(float), ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy D2H");
+                if (async_stream_) std::memcpy(t.data.data(), host_outputs_[i]->ptr, count * sizeof(float));
+                else check(aclrtMemcpy(t.data.data(), count * sizeof(float), outputs_->buffers[i]->ptr,
+                                      count * sizeof(float), ACL_MEMCPY_DEVICE_TO_HOST), "aclrtMemcpy D2H");
             }
             result.push_back(std::move(t));
         }

@@ -381,6 +381,14 @@ void dynamic_batch_test() {
     throws([&] { validate_config(invalid_config); });
     invalid_config["models"]["shared"]["instance_overrides"] = Json::array({Json::object(), Json::object(), Json::object()});
     throws([&] { validate_config(invalid_config); });
+    auto acl_config = config();
+    acl_config["models"]["shared"] = {{"backend", "acl"}, {"path", "fake.om"},
+        {"preprocess", {{"width", 20}, {"height", 10}}},
+        {"inputs", Json::array({{{"name", "input"}, {"source", "image"}}})},
+        {"decoder", {{"type", "ctc"}}}, {"acl_async_stream", true}};
+    validate_config(acl_config);
+    acl_config["models"]["shared"]["acl_async_stream"] = "true";
+    throws([&] { validate_config(acl_config); });
 }
 void box_pool_fairness_test() {
     std::promise<void> entered, release, second_layout;

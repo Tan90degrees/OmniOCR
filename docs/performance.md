@@ -19,6 +19,7 @@
 | 单页多 BOX 并发 | 服务/批处理每页固定 1 个 BOX 线程，单页图像无法填满后端请求槽位 | 可配置共享 BOX 工作池，单页多 BOX 同时调用模型；线程数只随全局 `box_workers` 增长 |
 | 跨页 BOX 公平调度 | 一个繁忙页面的工作循环长期占用 BOX 工作线程 | 每个任务处理一个 BOX 后回到全局队列尾部；每页同时提交不超过 `box_workers` 个任务，其他页面得以轮流执行 |
 | 实例级组批配置 | 同一模型的所有并发槽位共享一组批大小和等待窗口 | `instance_overrides` 按槽位设置批大小与窗口，所有实例仍从该模型的全局 BOX 队列领取任务 |
+| ACL stream 推理 | 每个输入同步 H2D、同步执行 OM、每个输出同步 D2H | 每个模型句柄独立 stream，复用锁页 Host 缓冲；按序提交 H2D、异步模型执行和 D2H，一次同步后读取结果 |
 
 模型实例池保证同一个 HTTP 客户端不被多个线程同时使用；实例可在线程间转移。每次请求完成或异常后清理请求选项，保留连接缓存；不同实例不共享认证头。HTTP 服务主动关闭连接时会按需新建连接。外部插件继续控制自己的传输实现，公共 `post_json()` 保留一次性调用语义，不自动获得实例级缓存。
 
@@ -31,6 +32,10 @@
 配置 `instances: 1, max_concurrent_requests: 8` 可让同一个 vLLM endpoint 最多同时收到 8 个请求；在同一配置文件设置 `execution.box_workers: 8` 后，REST 和批处理的单页多 BOX 也能填充这些请求槽位，命令行/批处理清单可临时覆盖。页面布局仍先执行，`execution.document_workers` 和 `execution.page_workers` 控制读取与在处理页面数，远端服务仍需具备相应容量。对 `batch_size>1` 的后端，该参数限制并行批次数；`max_concurrent_requests × batch_size` 只是理论最大有效样本数，实际取决于请求到达和尾批窗口。本地 ACL/ONNX 不能安全地由多个线程共享同一不可重入句柄，额外槽位会加载额外模型副本，需要实测设备内存和真实吞吐。
 
 全局模型队列使用空闲实例领取队首 BOX，不预分配固定实例队列；配置每实例 batch/window 时，尺寸小的实例可能优先处理零散任务，尺寸大的实例在请求足够或窗口到期时执行。模型等待仍占用调用方 BOX 工作线程，吞吐上限还取决于 `box_workers`；下一步可对等待推理的 BOX 引入异步完成回调以降低线程占用。该调度改动尚无目标 NPU 的前后对照数据，不能以先前基准的倍率宣称本轮收益。
+
+ACL stream 的“异步”指 Host 将拷贝与模型执行排入指定 stream；当前 `TensorEngine::run` 返回时仍需拿到输出，因此每次调用末尾同步。多个句柄可以在不同 stream 中重叠执行，单句柄的单个请求不会因改用 stream 自动实现流水线跨请求重叠。可设置 `models.<id>.acl_async_stream: false` 使用旧的同步路径做同机对照。无设备的 CI 使用模拟 ACL SDK 检查调用顺序、锁页内存、并行 stream、错误回收和结果；**吞吐、设备利用率与精度收益需要目标昇腾机器测量**。
+
+真实 NPU 对照建议固定同一可用 OM、输入集和硬件，预热后交替运行 `acl_async_stream: false/true` 各至少三轮，保持 `instances`、`max_concurrent_requests`、`execution.box_workers`、批大小及服务负载一致。分别测单实例单页、多实例跨页和多实例跨文件，记录完成吞吐、P50/P95/P99、H2D/执行/D2H 阶段耗时、Host 锁页内存、设备内存、NPU 利用率、错误率及结果哈希；另测异常退出后的资源释放。现有 REST 基准的真实模式可收集端到端数据，细分设备阶段需在设备上结合 CANN profiling；不要把模拟 SDK 的并行断言当作性能倍率。
 
 [libcurl reset 文档](https://curl.se/libcurl/c/curl_easy_reset.html)说明连接缓存与请求选项的区别；[线程安全约定](https://curl.se/libcurl/c/threadsafe.html)要求同一 handle 不被并发使用。
 

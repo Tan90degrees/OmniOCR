@@ -126,6 +126,8 @@ void validate_config(const Json& c) {
                 require(std::set<std::string>{"image", "original_shape", "scale_factor", "constant"}.count(input.at("source").get<std::string>()), "unknown tensor input source");
             }
             if (backend == "acl") {
+                if (m.contains("acl_async_stream"))
+                    require(m.at("acl_async_stream").is_boolean(), "acl_async_stream must be boolean");
                 const auto ids = m.value("device_ids", std::vector<int>{0});
                 require(!ids.empty(), "device_ids cannot be empty");
                 for (int device : ids) require(device >= 0, "negative device ID");

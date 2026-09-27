@@ -120,6 +120,8 @@ python tools/paddle_layout_server.py --model PP-DocLayoutV2 --device cpu --port 
 
 `backend` 为 `acl` 或 `onnx`。输入和输出名称、shape、dtype、前处理、类别表、字典必须从你实际导出的模型确认。框架只内置以下适配，其他模型通过 `Model`/`TensorEngine` 扩展。
 
+ACL 模型默认启用 `"acl_async_stream": true`：每个活跃模型句柄持有独立 stream 和复用的锁页 Host 输入/输出缓冲。一次调用按顺序提交所有 H2D 拷贝、`aclmdlExecuteAsync` 和 D2H 拷贝，最后同步一次，再读取结果；不同句柄可通过各自的 stream 并行执行。此设置不会让同一模型句柄同时处理多个请求，实际并发仍由 `max_concurrent_requests`、`execution.box_workers` 和设备容量共同决定。需要与旧版同步执行对照或兼容特定 CANN 环境时，可对该模型设置 `"acl_async_stream": false`。锁页缓冲按 OM 输入/输出字节数为**每个活跃句柄**各申请一套，配置并发时应计入 Host 内存预算。失败的 stream 同步不会被重新用于下一次推理。
+
 ### 输入
 
 `preprocess` 必须包含固定 `width/height`。当前把 RGB 图像双线性拉伸到该尺寸，布局为 NCHW，默认 `scale=1/255`、`mean=[0,0,0]`、`std=[1,1,1]`，计算 `(pixel * scale - mean) / std`。`color` 可选 `rgb/bgr`。不隐式 letterbox、自动 AIPP 或处理动态多档 shape。
