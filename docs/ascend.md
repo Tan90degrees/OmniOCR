@@ -47,11 +47,11 @@ atc --framework=5 --model=MODEL.onnx --output=MODEL \
 | ONNX C++ 编译和真实推理 | 已通过，测试使用生成的小图，不代表真实 OCR 精度 |
 | ACL 编译、OM 模型加载、NPU 推理 | 用户在 EulerOS 2.0 SP13 / Ascend 310P3 上报告 DocLayout_21label_infer OM 实机通过；详见下方验证记录 |
 | 真实模型 OCR（DocLayout + OvisOCR2） | 用户报告端到端生成真实 OCR 结果；本记录不等于 MinerU/Paddle 权重已验证或精度评测完成 |
-| ACL 清理、显存回收及正常退出 | 用户报告结果写出后进程 SIGSEGV（退出码 139），待定位与修复 |
+| ACL 清理、显存回收及正常退出 | 2026-09-21 曾报告退出 139；2026-09-27 用户反馈最新测试未再出现，缺少重复退出码与资源回收记录 |
 
 上线前应在实际机器补齐：同模型多实例、跨 BOX 共享、异常后释放、长 PDF 内存稳定性、表格/公式质量、并发吞吐和尾延迟。没有通过这些测量之前不承诺具体吞吐、显存占用或工业级识别精度。
 
-ACL 模型现支持按模型配置 `acl_async_stream: true` 使用句柄独立 stream、锁页 Host 缓冲和单次 stream 同步；默认 `false` 保持同步路径，便于在实机验证前安全部署与受控对比。当前仓库仅用模拟 ACL SDK 验证 API 排序与资源释放；310P3 上的实际吞吐、稳定性、CANN 版本兼容性和下述退出崩溃仍需设备复测。对照方法见[并发与性能](performance.md)。
+ACL 模型默认使用 `acl_async_stream: true`，通过句柄独立 stream、锁页 Host 缓冲和单次 stream 同步执行；可配置为 `false` 回退到同步路径。用户于 2026-09-27 反馈异步流实机可用，旧的退出 139 未再出现；尚未提供对应的版本、退出码和多轮对照数据，不能据此计算性能提升或证明长稳。对照方法见[并发与性能](performance.md)。
 
 ## 用户提供的 310P3 实机验证记录（2026-09-21）
 
@@ -73,11 +73,11 @@ ACL 模型现支持按模型配置 `acl_async_stream: true` 使用句柄独立 s
 
 请以实际 OM 输入签名和导出时的预处理协议核对 `name`、`shape`、`dtype` 和坐标空间；不能把固定比例值推广到所有 DocLayout/Paddle OM。用户的 `configs/acl_local_layout.json`、`configs/acl_vllm_ocr.json` 为实机环境使用的文件，本仓库尚未收录，不假定其中的本地模型路径或服务地址可以复用。
 
-### 尚未关闭：退出阶段的 SIGSEGV
+### 历史记录：退出阶段的 SIGSEGV
 
-报告记录了结果文件正常生成，但 OmniOCR 退出码为 **139（SIGSEGV）**，同时发现 `libunified_dlog.so` 缺失。**结果写出成功 != 进程正常退出**。缺失库可能与该故障有关，但尚无堆栈可以证明崩溃源仅在 CANN SDK，也未排除本项目的 ACL 释放顺序及动态库/环境兼容问题。
+2026-09-21 的报告记录了结果文件正常生成，但 OmniOCR 退出码为 **139（SIGSEGV）**，同时发现 `libunified_dlog.so` 缺失。2026-09-27 用户反馈最新测试已不再出现 139，异步流可用；尚无原问题的堆栈、根因或修复归因，也未收到本次的重复退出码记录。两次反馈对应的完整环境是否相同尚不明确。
 
-排查时请保持相同的容器、驱动、CANN 和模型配置，先复现并获取堆栈：
+若问题复现，请保持相同的容器、驱动、CANN 和模型配置并获取堆栈；日常回归也可运行并记录退出码：
 
 ```bash
 ./build/omniocr --config configs/acl_vllm_ocr.json --input /path/to/input.png --output /tmp/ocr-debug
@@ -88,7 +88,7 @@ printf 'exit=%d\\n' "$?"
 find /usr/local/Ascend -name 'libunified_dlog.so*' 2>/dev/null
 ```
 
-需根据堆栈区分是否发生在 `AclEngine::clear()` 的 dataset/buffer/desc/model/context 释放，还是静态 `Runtime` 的 `aclrtResetDevice()` / `aclFinalize()`，或其他动态库卸载阶段。进一步用 ACL+mock、纯 HTTP/mock 两组流程对照，检查镜像内 CANN 运行库、驱动挂载、共享库搜索路径与权限。未确认正常退出及重复运行资源释放前，本验收项保持未通过。
+若复现，需根据堆栈区分是否发生在 `AclEngine::clear()` 的 dataset/buffer/desc/model/context 释放，还是静态 `Runtime` 的 `aclrtResetDevice()` / `aclFinalize()`，或其他动态库卸载阶段。进一步用 ACL+mock、纯 HTTP/mock 两组流程对照，检查镜像内 CANN 运行库、驱动挂载、共享库搜索路径与权限。长稳与资源回收仍需单独测量。
 
 ## 相关文档
 

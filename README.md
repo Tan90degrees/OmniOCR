@@ -121,4 +121,4 @@ ctest --test-dir build --output-on-failure
 | [测试与验证](docs/testing.md) | 测试命令、覆盖范围、实机与准确率验收边界 |
 | [x64 / ARM64 离线包](packaging/README.md) | 双架构构建、各自下载/验证及 SDK、转换器依赖 |
 
-当前为 **0.1 基线**。已有自动化功能测试和用户提供的 310P3 真实 OCR 链路验证；全面准确率、性能与长期稳定性仍需目标环境验收。ACL 退出阶段 SIGSEGV 仍由 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2) 跟踪，结果生成不代表正常退出。验证依据与范围统一见 [测试文档](docs/testing.md) 和 [昇腾记录](docs/ascend.md)。
+当前为 **0.1 基线**。已有自动化功能测试和用户提供的 310P3 真实 OCR 链路验证；全面准确率、性能与长期稳定性仍需目标环境验收。此前的 ACL 退出阶段 SIGSEGV 在用户最新测试中未再出现；原始记录及验证范围见 [Issue #2](https://github.com/Tan90degrees/OmniOCR/issues/2)、[测试文档](docs/testing.md) 和 [昇腾记录](docs/ascend.md)。

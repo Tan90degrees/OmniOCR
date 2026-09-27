@@ -65,7 +65,7 @@ class AclEngine final : public TensorEngine {
     struct InputInfo { std::string name; std::vector<int64_t> shape; };
     std::vector<InputInfo> input_info_;
     size_t fixed_batch_ = 0;
-    bool async_stream_ = false, stream_failed_ = false;
+    bool async_stream_ = true, stream_failed_ = false;
     void clear() noexcept {
         if (context_) aclrtSetCurrentContext(context_);
         // Do not release pinned/device buffers while tasks might still use them.
@@ -78,7 +78,7 @@ class AclEngine final : public TensorEngine {
     }
 public:
     AclEngine(const Json& c, size_t index) {
-        async_stream_ = c.value("acl_async_stream", false);
+        async_stream_ = c.value("acl_async_stream", true);
         const bool batching = c.value("batch_size", 1) > 1;
         const auto devices = c.value("device_ids", std::vector<int>{0});
         if (devices.empty()) throw std::runtime_error("empty ACL device_ids");

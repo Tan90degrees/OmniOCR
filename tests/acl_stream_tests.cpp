@@ -223,10 +223,12 @@ int main() {
         cfg.erase("acl_async_stream");
         {
             auto default_engine = make_acl_engine(cfg, 0);
+            fake::require(fake::streams == 1, "default ACL mode must create a stream");
             verify(*default_engine, 1);
-            fake::require(fake::streams == 0 && fake::sync_copies == 4,
-                          "default ACL mode must remain synchronous");
+            fake::require(fake::sync_copies == 2,
+                          "default ACL mode must use asynchronous copies");
         }
+        fake::require(fake::streams == 0 && fake::pinned.empty(), "default ACL stream leaked");
         std::cout << "PASS: ACL stream ordering, pinned buffers, parallel instances and cleanup\n";
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n';
