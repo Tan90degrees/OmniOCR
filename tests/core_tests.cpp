@@ -216,6 +216,47 @@ void pool_test() {
     try { single.infer("m", image(), ""); } catch (...) { timed_out = true; }
     release.set_value(); job.get(); expect(timed_out, "pool acquisition did not time out");
 }
+void cancellation_pool_test() {
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    struct Blocking : Model {
+        std::promise<void>& entered;
+        std::shared_future<void> gate;
+        std::atomic<bool> first{true};
+        Blocking(std::promise<void>& e, std::shared_future<void> g) : entered(e), gate(g) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            if (first.exchange(false)) { entered.set_value(); gate.wait(); }
+            return {{"text", prompt}};
+        }
+    };
+    ModelRegistry registry({{"m", {{"instances", 1}, {"acquire_timeout_ms", 3000}}}},
+        [&](const Json&, size_t) { return std::make_unique<Blocking>(entered, gate); });
+    auto active = std::async(std::launch::async, [&] {
+        auto sample = image(); return registry.infer("m", sample, "first");
+    });
+    entered.get_future().wait();
+    auto token = std::make_shared<std::atomic<bool>>(false);
+    auto waiting = std::async(std::launch::async, [&] {
+        CancellationScope scope(token.get());
+        auto sample = image();
+        try { registry.infer("m", sample, "cancelled"); }
+        catch (const Cancelled&) { return true; }
+        return false;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (registry.scheduler_metrics()["m"]["queued"] != 1 &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    token->store(true);
+    const bool woke = waiting.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    release.set_value();
+    expect(woke && waiting.get() && active.get()["text"] == "first" &&
+           registry.scheduler_metrics()["m"]["queued"] == 0,
+           "cancelled model waiter retained its slot or BOX input");
+    auto sample = image();
+    expect(registry.infer("m", sample, "recovered")["text"] == "recovered",
+           "model lease unavailable after cancellation");
+}
 void adaptive_concurrency_test() {
     auto settings = config();
     settings["models"]["shared"] = {{"backend", "vllm"}, {"endpoint", "http://127.0.0.1:1/v1/chat/completions"},
@@ -808,7 +849,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

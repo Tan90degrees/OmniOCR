@@ -15,6 +15,7 @@
 | [batch_integration.py](../tests/batch_integration.py) | 页调度、优先级、并发约束和任务隔离 | 模拟后端 |
 | [server_performance_integration.py](../tests/server_performance_integration.py) | 等待文档优先级/FIFO、大文件并发下载、断开后 FD 回收 | 模拟推理，验证调度与资源行为 |
 | [server_admission_integration.py](../tests/server_admission_integration.py) | 活跃任务/上传字节准入、断线归还、页面字节背压、超大页失败与计数核对 | 模拟推理，验证过载边界和配额恢复 |
+| [server_cancellation_integration.py](../tests/server_cancellation_integration.py) | 排队/HTTP 推理/转换取消、任务列表、上传源文件读取、结果和源文件删除、累计配额 | 本地慢服务及受控转换脚本；ACL/ONNX 在途取消需目标设备回归 |
 | [dynamic_batch_integration.py](../tests/dynamic_batch_integration.py) | 跨文件组批、单页多 BOX 填满原生批次、并行批次及结果对应 | 本地协议夹具，无远端模型权重 |
 | [backend_concurrency_integration.py](../tests/backend_concurrency_integration.py) | 单 VLM endpoint、单配置实例下，后端同时在途从 1 提高到 4 | 模拟 Chat Completions 服务，不代表真实 vLLM 能达到相同吞吐 |
 | [box_concurrency_integration.py](../tests/box_concurrency_integration.py) | 配置文件直接启动 REST、命令行覆盖、批处理继承 `execution`、服务结果大小配额、单页四 BOX 并发及结果顺序 | 模拟 VLM 服务；验证全局池能填充模型并发槽位 |
@@ -36,6 +37,7 @@ python3 tests/batch_integration.py build/omniocr
 python3 tests/server_integration.py build/omniocr-server --formats
 python3 tests/server_performance_integration.py build/omniocr-server
 python3 tests/server_admission_integration.py build/omniocr-server
+python3 tests/server_cancellation_integration.py build/omniocr-server
 python3 tests/dynamic_batch_integration.py build/omniocr-server
 python3 tests/backend_concurrency_integration.py build/omniocr
 python3 tests/box_concurrency_integration.py build/omniocr build/omniocr-server

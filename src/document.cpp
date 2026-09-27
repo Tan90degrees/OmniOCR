@@ -25,6 +25,7 @@ TempDir::TempDir() {
 TempDir::~TempDir() { std::error_code ec; fs::remove_all(path, ec); }
 
 std::string run_process(const std::vector<std::string>& args, int timeout_seconds) {
+    throw_if_cancelled();
     if (args.empty() || timeout_seconds <= 0) throw std::runtime_error("invalid process arguments");
     std::vector<char*> argv;
     for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
@@ -66,6 +67,7 @@ std::string run_process(const std::vector<std::string>& args, int timeout_second
     };
     int status = 0;
     while (true) {
+        throw_if_cancelled();
         drain();
         auto done = waitpid(pid, &status, WNOHANG);
         if (done == pid) { cleanup.reaped = true; drain(); break; }
@@ -93,16 +95,22 @@ bool supports_input_extension(std::string ext) {
 }
 
 void read_document(const fs::path& input, const Json& settings, const std::function<void(int, const Image&)>& consume) {
+    throw_if_cancelled();
+    const auto checked_consume = [&](int page, const Image& image) {
+        throw_if_cancelled();
+        consume(page, image);
+        throw_if_cancelled();
+    };
     const fs::path source = fs::absolute(input);
     if (!fs::is_regular_file(source)) throw std::runtime_error("input is not a regular file");
     std::string ext = source.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
     uint64_t max_pixels = settings.value("max_pixels", uint64_t(40000000));
     if (std::set<std::string>{".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".pgm", ".tga"}.count(ext)) {
-        consume(1, Image::load(source, max_pixels)); return;
+        checked_consume(1, Image::load(source, max_pixels)); return;
     }
     if (ext == ".tif" || ext == ".tiff") {
-        read_tiff(source, settings, consume); return;
+        read_tiff(source, settings, checked_consume); return;
     }
     if (!supports_input_extension(ext)) throw std::runtime_error("unsupported input extension: " + ext);
     TempDir temp;
@@ -151,6 +159,7 @@ void read_document(const fs::path& input, const Json& settings, const std::funct
     for (std::sregex_iterator it(sizes.begin(), sizes.end(), size_pattern), end; it != end; ++it)
         longest_edges[std::stoi((*it)[1])] = std::max(std::stod((*it)[2]), std::stod((*it)[3]));
     for (int page = 1; page <= count; ++page) {
+        throw_if_cancelled();
         const auto prefix = temp.path / "page";
         if (!longest_edges.count(page) || longest_edges.at(page) <= 0)
             throw std::runtime_error("cannot determine PDF page dimensions");
@@ -164,7 +173,7 @@ void read_document(const fs::path& input, const Json& settings, const std::funct
         }
         args.push_back(pdf.string()); args.push_back(prefix.string());
         run_process(args, timeout);
-        consume(page, Image::load(prefix.string() + ".ppm", max_pixels));
+        checked_consume(page, Image::load(prefix.string() + ".ppm", max_pixels));
         fs::remove(prefix.string() + ".ppm");
     }
 }

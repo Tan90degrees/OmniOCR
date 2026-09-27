@@ -1,5 +1,6 @@
 #pragma once
 #include <nlohmann/json.hpp>
+#include "omniocr/cancellation.hpp"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -129,7 +130,8 @@ private:
     friend class ServerScheduler;  // Persistent REST dispatcher shares the bounded model registry.
     using BoxSubmit = std::function<std::future<void>(std::function<void()>)>;
     Page process_page(int number, const Image& image, const fs::path& output_dir,
-                      int box_workers, const BoxSubmit& submit = {});
+                      int box_workers, const BoxSubmit& submit = {},
+                      const CancellationToken& cancel = {});
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
 };
