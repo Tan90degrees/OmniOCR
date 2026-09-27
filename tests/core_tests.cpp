@@ -1,5 +1,6 @@
 #include "omniocr/tensor.hpp"
 #include "omniocr/plugins.hpp"
+#include "../src/backends/http_client.hpp"
 #include <algorithm>
 #include <mutex>
 #include <atomic>
@@ -214,6 +215,119 @@ void pool_test() {
     bool timed_out = false;
     try { single.infer("m", image(), ""); } catch (...) { timed_out = true; }
     release.set_value(); job.get(); expect(timed_out, "pool acquisition did not time out");
+}
+void adaptive_concurrency_test() {
+    auto settings = config();
+    settings["models"]["shared"] = {{"backend", "vllm"}, {"endpoint", "http://127.0.0.1:1/v1/chat/completions"},
+        {"model", "fixture"}, {"instances", 1}, {"max_concurrent_requests", 4},
+        {"acquire_timeout_ms", 5000}, {"adaptive_concurrency", {
+            {"enabled", true}, {"min_concurrency", 1}, {"initial_concurrency", 1},
+            {"window_ms", 100}, {"min_samples", 2}, {"latency_target_ms", 1000},
+            {"token_budget", 10000}, {"image_pixels_per_token", 1000},
+            {"expected_output_tokens", 100}}}};
+    validate_config(settings);
+    struct State { std::atomic<int> active{0}, peak{0}; } state;
+    struct Slow : Model {
+        State& state;
+        explicit Slow(State& s) : state(s) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            const int now = ++state.active;
+            int old = state.peak;
+            while (old < now && !state.peak.compare_exchange_weak(old, now)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(70));
+            --state.active;
+            return {{"text", prompt}};
+        }
+    };
+    auto burst = [&](ModelRegistry& pool, int count) {
+        std::vector<std::future<Json>> jobs;
+        for (int i = 0; i < count; ++i) jobs.push_back(std::async(std::launch::async, [&, i] {
+            auto sample = image();
+            return pool.infer("shared", sample, std::to_string(i));
+        }));
+        for (int i = 0; i < count; ++i)
+            expect(jobs[i].get().at("text") == std::to_string(i), "adaptive result routing");
+    };
+    ModelRegistry adaptive(settings.at("models"), [&](const Json&, size_t) { return std::make_unique<Slow>(state); });
+    burst(adaptive, 20);
+    const auto metrics = adaptive.scheduler_metrics().at("shared");
+    expect(state.peak >= 2 && state.peak <= 4 && metrics.at("concurrency_limit") >= 2 &&
+           metrics.at("completed_total") == 20 && metrics.at("inflight") == 0,
+           "adaptive concurrency failed to increase under sustained demand");
+    settings["models"]["shared"]["adaptive_concurrency"]["initial_concurrency"] = 4;
+    settings["models"]["shared"]["adaptive_concurrency"]["token_budget"] = 200;
+    State budget_state;
+    ModelRegistry budget(settings.at("models"), [&](const Json&, size_t) { return std::make_unique<Slow>(budget_state); });
+    burst(budget, 8);
+    expect(budget_state.peak == 1 && budget.scheduler_metrics()["shared"]["inflight_estimated_tokens"] == 0,
+           "estimated token budget did not limit simultaneous requests");
+    settings["models"]["shared"]["max_concurrent_requests"] = 3;
+    auto& scheduling = settings["models"]["shared"]["adaptive_concurrency"];
+    scheduling["initial_concurrency"] = 2;
+    scheduling["expected_output_tokens"] = 1;
+    scheduling["token_budget"] = 150;
+    std::promise<void> first_started, release_first, small_started;
+    auto release_gate = release_first.get_future().share();
+    struct SizeProbe : Model {
+        std::promise<void>& first, &small;
+        std::shared_future<void> release;
+        SizeProbe(std::promise<void>& a, std::promise<void>& b, std::shared_future<void> r)
+            : first(a), small(b), release(r) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            if (prompt == "first") { first.set_value(); release.wait(); }
+            if (prompt == "small") small.set_value();
+            return {{"text", prompt}};
+        }
+    };
+    ModelRegistry mixed(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<SizeProbe>(first_started, small_started, release_gate);
+    });
+    auto first = std::async(std::launch::async, [&] { auto sample = image(); return mixed.infer("shared", sample, "first"); });
+    first_started.get_future().wait();
+    auto large = std::async(std::launch::async, [&] {
+        Image sample{400, 400, {}};
+        return mixed.infer("shared", sample, "large");
+    });
+    const auto queue_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (mixed.scheduler_metrics()["shared"]["queued"] != 1 &&
+           std::chrono::steady_clock::now() < queue_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    expect(mixed.scheduler_metrics()["shared"]["queued"] == 1, "large request was not queued");
+    auto small = std::async(std::launch::async, [&] { auto sample = image(); return mixed.infer("shared", sample, "small"); });
+    const bool bypassed = small_started.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    release_first.set_value();
+    expect(bypassed && small.get()["text"] == "small" && first.get()["text"] == "first" &&
+           large.get()["text"] == "large", "small BOX could not bypass token-blocked large BOX");
+    settings["models"]["shared"]["adaptive_concurrency"]["token_budget"] = 10000;
+    settings["models"]["shared"]["adaptive_concurrency"]["initial_concurrency"] = 3;
+    struct Overload : Model {
+        Json infer(const Image&, const std::string&) override { throw HttpStatusError(429); }
+    };
+    ModelRegistry overloaded(settings.at("models"), [](const Json&, size_t) { return std::make_unique<Overload>(); });
+    throws([&] { overloaded.infer("shared", image(), ""); });
+    expect(overloaded.scheduler_metrics()["shared"]["concurrency_limit"] == 1 &&
+           overloaded.scheduler_metrics()["shared"]["overload_total"] == 1 &&
+           overloaded.scheduler_metrics()["shared"]["cooldown_remaining_ms"] > 0,
+           "HTTP overload should halve the admission limit");
+    settings["models"]["shared"]["adaptive_concurrency"]["latency_target_ms"] = 10;
+    State latency_state;
+    ModelRegistry latency(settings.at("models"), [&](const Json&, size_t) { return std::make_unique<Slow>(latency_state); });
+    burst(latency, 20);
+    expect(latency.scheduler_metrics()["shared"]["concurrency_limit"] < 3 &&
+           latency.scheduler_metrics()["shared"]["window_mean_latency_ms"] > 10,
+           "high backend latency should lower the concurrency target");
+    auto bad = settings;
+    bad["models"]["shared"]["adaptive_concurrency"]["token_budget"] = 0;
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["adaptive_concurrency"]["initial_concurrency"] = 5;
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["batch_size"] = 2;
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["backend"] = "mock";
+    throws([&] { validate_config(bad); });
 }
 void dynamic_batch_test() {
     struct State { std::mutex mutex; std::vector<std::vector<std::string>> groups; } state;
@@ -694,7 +808,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

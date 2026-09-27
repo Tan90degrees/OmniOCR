@@ -56,6 +56,8 @@ public:
     // v1 single-request behavior and cannot silently serialize a batch.
     virtual bool supports_batch() const { return false; }
     virtual std::vector<Json> infer_batch(const std::vector<BatchInput>&);
+    // Optional usage for feedback calibration. The pool never requires it.
+    virtual size_t last_usage_tokens() const { return 0; }
 };
 using ModelFactory = std::function<std::unique_ptr<Model>(const Json&, size_t)>;
 std::unique_ptr<Model> make_model(const Json&, size_t instance);
@@ -68,6 +70,7 @@ public:
     ModelRegistry(const ModelRegistry&) = delete;
     ModelRegistry& operator=(const ModelRegistry&) = delete;
     Json infer(const std::string& id, const Image&, const std::string& prompt);
+    Json scheduler_metrics();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -121,6 +124,7 @@ public:
     // Returned entries match the original job ordering; page numbers remain ascending.
     std::vector<BatchResult> run_batch(const std::vector<BatchJob>& jobs,
                                        BatchOptions options = {});
+    Json model_metrics() { return models_->scheduler_metrics(); }
 private:
     friend class ServerScheduler;  // Persistent REST dispatcher shares the bounded model registry.
     using BoxSubmit = std::function<std::future<void>(std::function<void()>)>;

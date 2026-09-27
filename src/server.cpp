@@ -469,7 +469,8 @@ public:
                 {"reserved_page_bytes", reserved_page_bytes_},
                 {"inflight_upload_bytes", inflight_upload_bytes_},
                 {"admitted_total", admitted_}, {"succeeded_total", succeeded_},
-                {"failed_total", failed_}, {"rejected_total", rejected_}};
+                {"failed_total", failed_}, {"rejected_total", rejected_},
+                {"models", pipeline_.model_metrics()}};
     }
     fs::path result_file(const std::string& id, const std::string& format) {
         std::lock_guard<std::mutex> guard(mutex_);
