@@ -1,0 +1,66 @@
+{
+  "date": "2026-09-24",
+  "kind": "same-binary synthetic configuration comparison",
+  "server_sha256": "9ed6444656b9697cb91c93265d6b925638992a864a87f09c253994a886426543",
+  "workload": {
+    "requests_per_run": 24,
+    "warmup": 2,
+    "repeats": 3,
+    "client_concurrency": 1,
+    "page_workers": 1,
+    "document_workers": 1,
+    "boxes_per_page": 8,
+    "model_instances": 8,
+    "synthetic_backend_delay_ms": 15
+  },
+  "comparison": {
+    "1": {
+      "completed_docs_per_second": [
+        7.519,
+        7.625,
+        7.61
+      ],
+      "completion_p95_ms": [
+        139.561,
+        134.559,
+        135.458
+      ],
+      "backend_peak_inflight": [
+        1,
+        1,
+        1
+      ],
+      "succeeded": [
+        24,
+        24,
+        24
+      ],
+      "median_docs_per_second": 7.61,
+      "median_completion_p95_ms": 135.458
+    },
+    "8": {
+      "completed_docs_per_second": [
+        44.53,
+        47.503,
+        48.719
+      ],
+      "completion_p95_ms": [
+        29.088,
+        21.96,
+        24.302
+      ],
+      "backend_peak_inflight": [
+        8,
+        8,
+        8
+      ],
+      "succeeded": [
+        24,
+        24,
+        24
+      ],
+      "median_docs_per_second": 47.503,
+      "median_completion_p95_ms": 24.302
+    }
+  }
+}

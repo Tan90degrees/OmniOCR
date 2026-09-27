@@ -37,6 +37,13 @@ def run(binary, server_binary, source):
                         "--output", str(root / "out")], check=True)
         data = json.loads((root / "out/result.json").read_text())
         assert data["pages"][0]["blocks"][0]["text"] == "EXTERNAL_OK"
+        config['models']['ocr']['batch_size'] = 2
+        cfg.write_text(json.dumps(config))
+        unsupported = subprocess.run([binary, '--config', str(cfg), '--input', str(root/'input.ppm'),
+                                     '--output', str(root/'old-plugin-batch')], capture_output=True, timeout=30)
+        assert unsupported.returncode == 1 and b'does not support native batching' in unsupported.stderr
+        config['models']['ocr'].pop('batch_size')
+        cfg.write_text(json.dumps(config))
         manifest = [{"input": "input.ppm", "output": "batch-1", "priority": 100},
                     {"input": "input.ppm", "output": "batch-2", "priority": 0}]
         (root / "jobs.json").write_text(json.dumps(manifest))
@@ -91,6 +98,22 @@ def run(binary, server_binary, source):
                     _, stderr = server.communicate()
                     raise AssertionError(stderr[-1000:])
                 assert server.returncode == 0, stderr[-1000:]
+        batch_library = root / 'libbatch_backend.so'
+        subprocess.run(['cc', '-shared', '-fPIC', '-std=c11', '-I', str(source/'include'),
+                        str(source/'tests/plugins/sample_batch_backend.c'), '-o', str(batch_library)],
+                       check=True)
+        config['plugins'] = [{'id': 'example.batch', 'library': str(batch_library)}]
+        config['models']['ocr'] = {'backend': 'example.batch', 'instances': 1,
+                                   'batch_size': 2, 'max_batch_wait_ms': 20}
+        config['execution'] = {'workers': 2}
+        config['models']['layout']['response']['boxes'] = [
+            {'type': 'text', 'bbox': [0, 0, 1, .5]},
+            {'type': 'text', 'bbox': [0, .5, 1, 1]}]
+        cfg.write_text(json.dumps(config))
+        subprocess.run([binary, '--config', str(cfg), '--input', str(root/'input.ppm'),
+                        '--output', str(root/'batch-plugin')], check=True, timeout=30)
+        result = json.loads((root/'batch-plugin/result.json').read_text())
+        assert [block['text'] for block in result['pages'][0]['blocks']] == ['EXTERNAL_BATCH'] * 2
     print("PASS: independent C ABI plugin runs without pipeline changes in CLI, batch and REST")
 
 

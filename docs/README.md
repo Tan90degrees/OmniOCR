@@ -15,6 +15,7 @@
 | 一次处理多个文件并设置优先级 | [批处理](batch.md) → [调度原理](architecture.md) |
 | 嵌入 C++ 或扩展模型 | [C++ 集成](architecture.md#c-集成) → [模型适配](configuration.md) |
 | 验证功能与判断部署条件 | [测试与验证](testing.md) → [目标设备验证](ascend.md) |
+| 优化大规模高并发 | [并发与性能](performance.md) |
 | 在 ARM64 环境离线运行 | [离线包说明](../packaging/README.md) → [额外格式依赖](input-formats.md) |
 
 ## 文档分工
@@ -29,6 +30,7 @@
 | [批处理](batch.md) | jobs 清单、优先级与批次错误处理 |
 | [架构与资源生命周期](architecture.md) | 实现边界、线程模型、资源管理、C++ API |
 | [昇腾部署与验证](ascend.md) | OM/设备适配、真实硬件记录与待解决问题 |
+| [并发与性能](performance.md) | 已实现优化、可复现压测、资源指标与后续路线 |
 | [测试与验证](testing.md) | 自动化命令、测试覆盖与验收边界 |
 | [ARM64 离线包](../packaging/README.md) | 包内容、运行要求、分发步骤 |
 

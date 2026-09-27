@@ -14,6 +14,7 @@ namespace {
 struct SharedLibrary {
     void* handle = nullptr;
     const omniocr_plugin_api_v1* api = nullptr;
+    const omniocr_plugin_api_v2* api_v2 = nullptr;
     ~SharedLibrary() { if (handle) dlclose(handle); }
 };
 std::map<std::string, std::shared_ptr<SharedLibrary>>& libraries() {
@@ -33,8 +34,10 @@ public:
                                                    std::string(library_->api->plugin_id));
     }
     ~Instance() { if (handle_) library_->api->destroy(handle_); }
-    Json execute(const Json& input) {
+    bool supports_batch() const { return library_->api_v2 != nullptr; }
+    Json execute(const Json& input, bool batch = false) {
         std::lock_guard<std::mutex> guard(mutex_);
+        if (batch && !supports_batch()) throw std::runtime_error("plugin does not support batch inference");
         const auto request=input.dump();
         char* output=nullptr; size_t length=0;
         char* error=nullptr; size_t error_length=0;
@@ -46,7 +49,8 @@ public:
                 if (error && error!=output) api->release(instance,error);
             }
         } cleanup{library_->api,handle_,output,error};
-        const int rc=library_->api->execute(handle_,request.data(),request.size(),
+        const auto call=batch?library_->api_v2->execute_batch:library_->api->execute;
+        const int rc=call(handle_,request.data(),request.size(),
                                           &output,&length,&error,&error_length);
         constexpr size_t limit=32u*1024u*1024u;
         if (length>limit || error_length>4096) throw std::runtime_error("plugin response exceeds size cap");
@@ -67,6 +71,20 @@ public:
     Json infer(const Image& image,const std::string& prompt) override {
         return instance_->execute({{"image","data:image/png;base64,"+base64(image.png())},
                                     {"width",image.width},{"height",image.height},{"prompt",prompt}});
+    }
+    bool supports_batch() const override { return instance_->supports_batch(); }
+    std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+        Json requests = Json::array();
+        for (const auto& item : inputs) {
+            if (!item.image) throw std::runtime_error("null batch image");
+            requests.push_back({{"image","data:image/png;base64,"+base64(item.image->png())},
+                {"width",item.image->width},{"height",item.image->height},{"prompt",item.prompt}});
+        }
+        const auto response=instance_->execute({{"requests",std::move(requests)}},true);
+        const auto& results=response.at("results");
+        if (!results.is_array() || results.size()!=inputs.size())
+            throw std::runtime_error("plugin batch response count mismatch");
+        return results.get<std::vector<Json>>();
     }
 };
 void install(const std::shared_ptr<SharedLibrary>& library) {
@@ -118,12 +136,23 @@ void load_plugins(const Json& config) {
             const char* reason=dlerror();
             throw std::runtime_error("cannot load plugin library: "+std::string(reason?reason:"unknown"));
         }
-        auto entry=reinterpret_cast<omniocr_plugin_entry_v1_fn>(
-            dlsym(library->handle,"omniocr_plugin_entry_v1"));
-        if (!entry) throw std::runtime_error("plugin missing omniocr_plugin_entry_v1");
-        library->api=entry();
+        auto entry_v2=reinterpret_cast<omniocr_plugin_entry_v2_fn>(
+            dlsym(library->handle,"omniocr_plugin_entry_v2"));
+        if (entry_v2) {
+            library->api_v2=entry_v2();
+            if (!library->api_v2 || library->api_v2->base.abi_version!=OMNIOCR_PLUGIN_ABI_V2 ||
+                library->api_v2->base.struct_size<sizeof(omniocr_plugin_api_v2) ||
+                !library->api_v2->execute_batch)
+                throw std::runtime_error("incompatible batch plugin ABI v2");
+            library->api=&library->api_v2->base;
+        } else {
+            auto entry=reinterpret_cast<omniocr_plugin_entry_v1_fn>(
+                dlsym(library->handle,"omniocr_plugin_entry_v1"));
+            if (!entry) throw std::runtime_error("plugin missing omniocr_plugin_entry_v1/v2");
+            library->api=entry();
+        }
         const auto api=library->api;
-        if (!api || api->abi_version!=OMNIOCR_PLUGIN_ABI_V1 ||
+        if (!api || api->abi_version!=(library->api_v2 ? OMNIOCR_PLUGIN_ABI_V2 : OMNIOCR_PLUGIN_ABI_V1) ||
             api->struct_size<sizeof(omniocr_plugin_api_v1))
             throw std::runtime_error("incompatible plugin ABI");
         if (!api->plugin_id || !api->kind || expected!=api->plugin_id ||

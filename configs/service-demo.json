@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "document": {
+    "dpi": 150,
+    "max_pages": 1000,
+    "max_pixels": 40000000,
+    "timeout_seconds": 120
+  },
+  "execution": {
+    "workers": 4,
+    "page_workers": 4,
+    "box_workers": 8,
+    "document_workers": 4,
+    "max_queued_pages": 8,
+    "on_error": "fail"
+  },
+  "layout": {
+    "provider": "normalized",
+    "model": "layout",
+    "coordinates": "normalized"
+  },
+  "models": {
+    "layout": {
+      "backend": "mock",
+      "instances": 1,
+      "response": {
+        "boxes": [
+          {
+            "type": "title",
+            "bbox": [
+              0.05,
+              0.05,
+              0.95,
+              0.2
+            ],
+            "order": 0
+          },
+          {
+            "type": "text",
+            "bbox": [
+              0.05,
+              0.25,
+              0.95,
+              0.7
+            ],
+            "order": 1
+          },
+          {
+            "type": "image",
+            "bbox": [
+              0.05,
+              0.75,
+              0.95,
+              0.95
+            ],
+            "order": 2
+          }
+        ]
+      }
+    },
+    "shared_ocr": {
+      "backend": "mock",
+      "instances": 1,
+      "response": {
+        "text": "[MOCK] Replace this backend with a real model."
+      },
+      "max_concurrent_requests": 4,
+      "batch_size": 2,
+      "max_batch_wait_ms": 10,
+      "max_pending_requests": 64,
+      "instance_overrides": [
+        {
+          "batch_size": 2,
+          "max_batch_wait_ms": 5
+        },
+        {},
+        {},
+        {}
+      ]
+    }
+  },
+  "routes": {
+    "title": {
+      "model": "shared_ocr",
+      "prompt": "Text Recognition:"
+    },
+    "text": {
+      "model": "shared_ocr",
+      "prompt": "Text Recognition:"
+    },
+    "image": {
+      "action": "image"
+    },
+    "*": {
+      "model": "shared_ocr"
+    }
+  },
+  "server": {
+    "data_dir": "../out/demo-server",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "max_upload_bytes": 67108864,
+    "max_jobs": 1000,
+    "max_active_jobs": 64,
+    "max_inflight_upload_bytes": 268435456,
+    "max_queued_page_bytes": 268435456,
+    "http_connections": 128,
+    "connection_timeout_seconds": 30,
+    "max_result_bytes": 67108864,
+    "max_asset_bytes": 134217728
+  }
+}

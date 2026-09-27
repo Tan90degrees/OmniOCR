@@ -10,14 +10,29 @@ class OnnxEngine final : public TensorEngine {
     Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "omniocr"};
     Ort::SessionOptions options_;
     std::unique_ptr<Ort::Session> session_;
+    size_t fixed_batch_ = 0;
 public:
     explicit OnnxEngine(const Json& c) {
+        const bool batching = c.value("batch_size", 1) > 1;
         int threads = c.value("intra_op_threads", 1);
         if (threads < 1) throw std::runtime_error("invalid ONNX intra_op_threads");
         options_.SetIntraOpNumThreads(threads);
         options_.SetInterOpNumThreads(1);
         session_ = std::make_unique<Ort::Session>(env_, c.at("path").get<std::string>().c_str(), options_);
+        for (size_t i = 0; i < session_->GetInputCount(); ++i) {
+            const auto shape = session_->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
+            if (shape.empty()) {
+                if (batching) throw std::runtime_error("ONNX batching requires a leading batch dimension");
+                continue;
+            }
+            if (shape[0] > 0) {
+                if (batching && fixed_batch_ && fixed_batch_ != size_t(shape[0]))
+                    throw std::runtime_error("ONNX input batch dimensions differ");
+                fixed_batch_ = size_t(shape[0]);
+            }
+        }
     }
+    size_t fixed_batch_size() const override { return fixed_batch_; }
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override {
         if (session_->GetInputCount() != inputs.size()) throw std::runtime_error("ONNX input count mismatch");
         Ort::AllocatorWithDefaultOptions allocator;

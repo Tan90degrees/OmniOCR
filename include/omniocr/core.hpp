@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -50,6 +51,11 @@ class Model {
 public:
     virtual ~Model() = default;
     virtual Json infer(const Image&, const std::string& prompt) = 0;
+    struct BatchInput { const Image* image; std::string prompt; };
+    // Only native batch-capable backends opt in. An ordinary plugin keeps its
+    // v1 single-request behavior and cannot silently serialize a batch.
+    virtual bool supports_batch() const { return false; }
+    virtual std::vector<Json> infer_batch(const std::vector<BatchInput>&);
 };
 using ModelFactory = std::function<std::unique_ptr<Model>(const Json&, size_t)>;
 std::unique_ptr<Model> make_model(const Json&, size_t instance);
@@ -98,9 +104,10 @@ struct BatchJob {
     int priority = 0;
 };
 struct BatchOptions {
-    int page_workers = 0;          // 0: use execution.workers
-    int max_active_documents = 2;  // concurrent document readers/converters
-    int max_queued_pages = 2;      // global queued images; bounds memory
+    int page_workers = 0;          // 0: use execution.page_workers (or workers)
+    int box_workers = 0;           // 0: use execution.box_workers
+    int max_active_documents = 0;  // 0: use execution.document_workers
+    int max_queued_pages = 0;      // 0: use execution.max_queued_pages
 };
 struct BatchResult {
     Document document;
@@ -116,7 +123,9 @@ public:
                                        BatchOptions options = {});
 private:
     friend class ServerScheduler;  // Persistent REST dispatcher shares the bounded model registry.
-    Page process_page(int number, const Image& image, const fs::path& output_dir, int box_workers);
+    using BoxSubmit = std::function<std::future<void>(std::function<void()>)>;
+    Page process_page(int number, const Image& image, const fs::path& output_dir,
+                      int box_workers, const BoxSubmit& submit = {});
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
 };

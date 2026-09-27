@@ -1,0 +1,419 @@
+{
+  "baseline_git_sha": "b9c4d733ed5af2c494b84d768126506a79cc5954",
+  "build": "Release, GCC 13.3.0, Linux x86_64, libcurl 8.5.0",
+  "scope": "Synthetic HTTP fixture, no NPU/model quality test. Default scenario: 3 repeats; history scenario: 1 exploratory repeat. Individual job records are emitted by the tool; this checked-in report retains aggregate results only.",
+  "scenarios": {
+    "baseline": {
+      "schema_version": 1,
+      "mode": "synthetic",
+      "load_model": "closed-loop fixed client concurrency",
+      "notes": "Completion includes queueing and polling delay; startup/warmup excluded from elapsed. RSS/threads/fds sampled every 10ms for the server process only. No OCR quality assertion. Synthetic delays are explicit, not device latency.",
+      "environment": {
+        "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+        "cpu_count": 9,
+        "server_sha256": "fb4e55263a00a09127cbc2f454d4f8d8d2b04dfc37cb57386059d99fe69a7109"
+      },
+      "settings": {
+        "server_binary": "build-baseline/omniocr-server",
+        "output": "out/performance/baseline.json",
+        "config": null,
+        "input": null,
+        "requests": 256,
+        "concurrency": 16,
+        "page_workers": 8,
+        "document_workers": 2,
+        "queued_pages": 8,
+        "model_instances": 8,
+        "boxes": 8,
+        "warmup": 16,
+        "history_jobs": 0,
+        "repeats": 3,
+        "model_delay_ms": 2,
+        "connection_delay_ms": 0,
+        "poll_ms": 5,
+        "timeout": 120
+      },
+      "runs": [
+        {
+          "repeat": 0,
+          "elapsed_seconds": 4.557967718999976,
+          "counts": {
+            "succeeded": 256,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 56.16538242095465,
+          "completed_pages_per_second": 56.16538242095465,
+          "admission": {
+            "count": 256,
+            "p50_ms": 5.567934000055175,
+            "p95_ms": 11.513242999967588,
+            "p99_ms": 14.751037999985783
+          },
+          "completion": {
+            "count": 256,
+            "p50_ms": 270.23801799998637,
+            "p95_ms": 400.5658809999204,
+            "p99_ms": 452.7993990000141
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 15264,
+            "threads": 29,
+            "fds": 38
+          },
+          "synthetic_backend": {
+            "measured_requests": 2048,
+            "measured_new_connections": 2048,
+            "total_connections": 2176,
+            "peak_inflight": 8
+          }
+        },
+        {
+          "repeat": 1,
+          "elapsed_seconds": 4.185930294000059,
+          "counts": {
+            "succeeded": 256,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 61.157253470498524,
+          "completed_pages_per_second": 61.157253470498524,
+          "admission": {
+            "count": 256,
+            "p50_ms": 5.781463000062104,
+            "p95_ms": 11.909715999991022,
+            "p99_ms": 13.330176999943433
+          },
+          "completion": {
+            "count": 256,
+            "p50_ms": 264.0737709999712,
+            "p95_ms": 315.83443799991073,
+            "p99_ms": 331.23608500000046
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 14884,
+            "threads": 30,
+            "fds": 38
+          },
+          "synthetic_backend": {
+            "measured_requests": 2048,
+            "measured_new_connections": 2048,
+            "total_connections": 2176,
+            "peak_inflight": 8
+          }
+        },
+        {
+          "repeat": 2,
+          "elapsed_seconds": 3.9370978430000605,
+          "counts": {
+            "succeeded": 256,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 65.0225140975741,
+          "completed_pages_per_second": 65.0225140975741,
+          "admission": {
+            "count": 256,
+            "p50_ms": 5.313129999990451,
+            "p95_ms": 10.270935999983521,
+            "p99_ms": 12.962076999997407
+          },
+          "completion": {
+            "count": 256,
+            "p50_ms": 246.9015460000037,
+            "p95_ms": 286.839633999989,
+            "p99_ms": 297.84130600000935
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 14972,
+            "threads": 28,
+            "fds": 40
+          },
+          "synthetic_backend": {
+            "measured_requests": 2048,
+            "measured_new_connections": 2048,
+            "total_connections": 2176,
+            "peak_inflight": 8
+          }
+        }
+      ]
+    },
+    "optimized": {
+      "schema_version": 1,
+      "mode": "synthetic",
+      "load_model": "closed-loop fixed client concurrency",
+      "notes": "Completion includes queueing and polling delay; startup/warmup excluded from elapsed. RSS/threads/fds sampled every 10ms for the server process only. No OCR quality assertion. Synthetic delays are explicit, not device latency.",
+      "environment": {
+        "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+        "cpu_count": 9,
+        "server_sha256": "40dcbe204ebeca181bbaf5e8d442c5cba2d313ab69765414d5ccfeadfd6fd91b"
+      },
+      "settings": {
+        "server_binary": "build-perf/omniocr-server",
+        "output": "out/performance/optimized.json",
+        "config": null,
+        "input": null,
+        "requests": 256,
+        "concurrency": 16,
+        "page_workers": 8,
+        "document_workers": 2,
+        "queued_pages": 8,
+        "model_instances": 8,
+        "boxes": 8,
+        "warmup": 16,
+        "history_jobs": 0,
+        "repeats": 3,
+        "model_delay_ms": 2,
+        "connection_delay_ms": 0,
+        "poll_ms": 5,
+        "timeout": 120
+      },
+      "runs": [
+        {
+          "repeat": 0,
+          "elapsed_seconds": 1.4784914719999733,
+          "counts": {
+            "succeeded": 256,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 173.1494600058164,
+          "completed_pages_per_second": 173.1494600058164,
+          "admission": {
+            "count": 256,
+            "p50_ms": 7.175845999995545,
+            "p95_ms": 13.464583999962088,
+            "p99_ms": 16.970599000046604
+          },
+          "completion": {
+            "count": 256,
+            "p50_ms": 90.35100399989915,
+            "p95_ms": 114.70919399994273,
+            "p99_ms": 127.69971800003077
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 12820,
+            "threads": 21,
+            "fds": 39
+          },
+          "synthetic_backend": {
+            "measured_requests": 2048,
+            "measured_new_connections": 0,
+            "total_connections": 8,
+            "peak_inflight": 8
+          }
+        },
+        {
+          "repeat": 1,
+          "elapsed_seconds": 1.5202122800000097,
+          "counts": {
+            "succeeded": 256,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 168.39753458641866,
+          "completed_pages_per_second": 168.39753458641866,
+          "admission": {
+            "count": 256,
+            "p50_ms": 7.263393000016549,
+            "p95_ms": 14.393795000046339,
+            "p99_ms": 23.460797999973693
+          },
+          "completion": {
+            "count": 256,
+            "p50_ms": 92.6468359999717,
+            "p95_ms": 115.88366900002711,
+            "p99_ms": 134.46351900006448
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 12912,
+            "threads": 20,
+            "fds": 36
+          },
+          "synthetic_backend": {
+            "measured_requests": 2048,
+            "measured_new_connections": 0,
+            "total_connections": 8,
+            "peak_inflight": 8
+          }
+        },
+        {
+          "repeat": 2,
+          "elapsed_seconds": 1.5044426440000507,
+          "counts": {
+            "succeeded": 256,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 170.16268517843966,
+          "completed_pages_per_second": 170.16268517843966,
+          "admission": {
+            "count": 256,
+            "p50_ms": 7.232731999920361,
+            "p95_ms": 14.278359999934764,
+            "p99_ms": 24.582314999975097
+          },
+          "completion": {
+            "count": 256,
+            "p50_ms": 91.27056500005892,
+            "p95_ms": 122.15372499997557,
+            "p99_ms": 135.88962799997262
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 12632,
+            "threads": 19,
+            "fds": 38
+          },
+          "synthetic_backend": {
+            "measured_requests": 2048,
+            "measured_new_connections": 0,
+            "total_connections": 8,
+            "peak_inflight": 8
+          }
+        }
+      ]
+    },
+    "baseline-history": {
+      "schema_version": 1,
+      "mode": "synthetic",
+      "load_model": "closed-loop fixed client concurrency",
+      "notes": "Completion includes queueing and polling delay; startup/warmup excluded from elapsed. RSS/threads/fds sampled every 10ms for the server process only. No OCR quality assertion. Synthetic delays are explicit, not device latency.",
+      "environment": {
+        "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+        "cpu_count": 9,
+        "server_sha256": "fb4e55263a00a09127cbc2f454d4f8d8d2b04dfc37cb57386059d99fe69a7109"
+      },
+      "settings": {
+        "server_binary": "build-baseline/omniocr-server",
+        "output": "out/performance/baseline-history.json",
+        "config": null,
+        "input": null,
+        "requests": 1000,
+        "concurrency": 16,
+        "page_workers": 8,
+        "document_workers": 2,
+        "queued_pages": 8,
+        "model_instances": 8,
+        "boxes": 1,
+        "warmup": 16,
+        "history_jobs": 9000,
+        "repeats": 1,
+        "model_delay_ms": 0.0,
+        "connection_delay_ms": 0,
+        "poll_ms": 5,
+        "timeout": 120
+      },
+      "runs": [
+        {
+          "repeat": 0,
+          "elapsed_seconds": 3.2203291569999237,
+          "counts": {
+            "succeeded": 1000,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 310.52726328497596,
+          "completed_pages_per_second": 310.52726328497596,
+          "admission": {
+            "count": 1000,
+            "p50_ms": 8.408612000039284,
+            "p95_ms": 16.82257100003426,
+            "p99_ms": 21.918532999961826
+          },
+          "completion": {
+            "count": 1000,
+            "p50_ms": 50.593057000014596,
+            "p95_ms": 68.91465300009258,
+            "p99_ms": 76.8563860000313
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 31544,
+            "threads": 31,
+            "fds": 40
+          },
+          "synthetic_backend": {
+            "measured_requests": 1000,
+            "measured_new_connections": 1000,
+            "total_connections": 10016,
+            "peak_inflight": 6
+          }
+        }
+      ]
+    },
+    "optimized-history": {
+      "schema_version": 1,
+      "mode": "synthetic",
+      "load_model": "closed-loop fixed client concurrency",
+      "notes": "Completion includes queueing and polling delay; startup/warmup excluded from elapsed. RSS/threads/fds sampled every 10ms for the server process only. No OCR quality assertion. Synthetic delays are explicit, not device latency.",
+      "environment": {
+        "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+        "cpu_count": 9,
+        "server_sha256": "40dcbe204ebeca181bbaf5e8d442c5cba2d313ab69765414d5ccfeadfd6fd91b"
+      },
+      "settings": {
+        "server_binary": "build-perf/omniocr-server",
+        "output": "out/performance/optimized-history.json",
+        "config": null,
+        "input": null,
+        "requests": 1000,
+        "concurrency": 16,
+        "page_workers": 8,
+        "document_workers": 2,
+        "queued_pages": 8,
+        "model_instances": 8,
+        "boxes": 1,
+        "warmup": 16,
+        "history_jobs": 9000,
+        "repeats": 1,
+        "model_delay_ms": 0.0,
+        "connection_delay_ms": 0,
+        "poll_ms": 5,
+        "timeout": 120
+      },
+      "runs": [
+        {
+          "repeat": 0,
+          "elapsed_seconds": 1.5559918410000364,
+          "counts": {
+            "succeeded": 1000,
+            "failed": 0,
+            "timeout": 0,
+            "request_error": 0
+          },
+          "completed_docs_per_second": 642.6768917742523,
+          "completed_pages_per_second": 642.6768917742523,
+          "admission": {
+            "count": 1000,
+            "p50_ms": 10.45514700001604,
+            "p95_ms": 21.170407999989038,
+            "p99_ms": 26.008579000063037
+          },
+          "completion": {
+            "count": 1000,
+            "p50_ms": 23.54510800000753,
+            "p95_ms": 40.580346999945505,
+            "p99_ms": 48.95141999998032
+          },
+          "process_peaks_including_warmup": {
+            "rss_kib": 28804,
+            "threads": 24,
+            "fds": 41
+          },
+          "synthetic_backend": {
+            "measured_requests": 1000,
+            "measured_new_connections": 0,
+            "total_connections": 8,
+            "peak_inflight": 8
+          }
+        }
+      ]
+    }
+  }
+}

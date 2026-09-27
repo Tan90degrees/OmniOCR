@@ -12,6 +12,8 @@ class TensorEngine {
 public:
     virtual ~TensorEngine() = default;
     virtual std::vector<Tensor> run(const std::vector<Tensor>&) = 0;
+    // 0 denotes a dynamic leading batch dimension; a positive value is fixed.
+    virtual size_t fixed_batch_size() const { return 0; }
 };
 std::unique_ptr<TensorEngine> make_onnx_engine(const Json&);
 std::unique_ptr<TensorEngine> make_acl_engine(const Json&, size_t instance);

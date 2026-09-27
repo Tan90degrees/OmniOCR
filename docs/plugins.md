@@ -16,7 +16,7 @@
 
 ## v2 配置和结果 schema 独立
 
-`version: 1` 旧配置继续受支持；`version: 2` 把 `executors`、`models` 绑定和 `pipeline` 拆分。读取配置时归一化为现有执行池：同一 `executor` ID 的不同模型绑定共用一个池，`max_inflight` 转为实例/请求槽位，`backend: openai_chat` 映射已有 vLLM HTTP 实现，结果 `model` 保留逻辑绑定 ID。使用 [PP-DocLayoutV3 + OvisOCR2 v2 配置示例](../configs/doclayout-v3-http-ovisocr2.v2.json)，修改 HTTP 端点和真实 served model name 后运行：
+`version: 1` 旧配置继续受支持；`version: 2` 把 `executors`、`models` 绑定和 `pipeline` 拆分。读取配置时归一化为现有执行池：同一 `executor` ID 的不同模型绑定共用一个池，原有 `max_inflight` 映射为 `instances`，可另设 `max_concurrent_requests` 控制同一服务的实际在途请求数；`backend: openai_chat` 映射已有 vLLM HTTP 实现，结果 `model` 保留逻辑绑定 ID。使用 [PP-DocLayoutV3 + OvisOCR2 v2 配置示例](../configs/doclayout-v3-http-ovisocr2.v2.json)，修改 HTTP 端点和真实 served model name 后运行：
 
 ```bash
 python tools/paddle_layout_server.py --model PP-DocLayoutV3 --device cpu --port 8001
@@ -46,7 +46,9 @@ Paddle 环境必须安装经验证的匹配版本并固定权重 revision、预�
 
 导出 `omniocr_plugin_entry_v1`，返回 `omniocr_plugin_api_v1` 函数表。支持 `kind: backend/layout/recognition`；`create/execute/release/destroy` 采用 opaque handle、显式 buffer 长度与状态码。**插件侧分配的所有输出/错误 buffer 必须由插件侧 release，错误不得跨 C ABI 抛出 C++ 异常**。调用方在模型实例和请求全部结束后释放句柄；插件共享库在进程退出时卸载，暂不支持热替换。layout 外部插件返回 Paddle 风格的统一 `boxes` JSON；recognition 返回 `text/raw_text`；backend 收到图像 data URL + prompt 的 JSON 请求并返回 JSON。32 MiB 的响应上限不是通用大张量传输协议。
 
-**安全边界：加载 .so 等于执行该库代码**；只从管理员信任的部署配置加载，并核验文件来源与签名，不能交给不可信 REST 调用方。当前 ABI 提供的是 JSON/图像级插件扩展：大规模 host/device Typed Tensor 零拷贝 ABI、独立外部服务 RPC 规范、动态 tensor dtype/shape、多阶段任务 DAG 尚未交付。内置 ACL/ONNX 仍局限现有 float32 静态适配；V3 ONNX/OM 必须在权重导出、输出解码和目标 Ascend 芯片实际验收后另行实现。
+**安全边界：加载 .so 等于执行该库代码**；只从管理员信任的部署配置加载，并核验文件来源与签名，不能交给不可信 REST 调用方。当前 ABI 提供的是 JSON/图像级插件扩展：大规模 host/device Typed Tensor 零拷贝 ABI、独立外部服务 RPC 规范、动态 tensor dtype/shape、多阶段任务 DAG 尚未交付。内置 ONNX 接受动态或固定批维 float32，ACL 仅接受静态批维 float32；V3 ONNX/OM 仍须在权重导出、输出解码和目标 Ascend 芯片实际验收后另行实现。
+
+可选的 `omniocr_plugin_entry_v2` 在保持 v1 字段布局的前提下增加 `execute_batch`，接收 `{"requests":[...]}` 并返回同序 `{"results":[...]}`。实现 v2 才能设置 `batch_size>1`；v1 插件仍按单请求使用，无需重新编译。[组批参数和后端能力](configuration.md#模型池)说明队列、等待时间以及 OM/ONNX 的输出形状。测试用 [v2 C 插件](../tests/plugins/sample_batch_backend.c)展示入口与 buffer 归还；插件必须真的按批次完成推理，不应仅逐项循环。
 
 ## 验收与当前范围
 
