@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 struct FakeContext { int device; };
@@ -25,6 +26,7 @@ struct aclmdlDesc { uint32_t id = 0; };
 namespace fake {
 std::mutex mutex;
 std::unordered_set<void*> pinned;
+std::unordered_map<uint32_t, size_t> batch_sizes;
 std::atomic<int> streams{0}, syncs{0}, async_copies{0}, sync_copies{0};
 std::atomic<int> active{0}, peak{0}, fail_execute{0}, fail_sync{0};
 std::atomic<uint32_t> next_model{1};
@@ -39,8 +41,8 @@ void require(bool condition, const char* message) {
 void execute(const aclmdlDataset* in, aclmdlDataset* out) {
     auto* input = static_cast<float*>(in->buffers[0]->ptr);
     auto* output = static_cast<float*>(out->buffers[0]->ptr);
-    output[0] = input[0] * 2;
-    output[1] = input[1] * 2;
+    require(in->buffers[0]->size == out->buffers[0]->size, "model buffer size mismatch");
+    for (size_t i = 0; i < in->buffers[0]->size / sizeof(float); ++i) output[i] = input[i] * 2;
 }
 } // namespace fake
 
@@ -116,7 +118,11 @@ aclError aclDestroyDataBuffer(aclDataBuffer* p) { delete p; return ACL_SUCCESS; 
 aclmdlDataset* aclmdlCreateDataset() { return new aclmdlDataset; }
 aclError aclmdlDestroyDataset(aclmdlDataset* p) { delete p; return ACL_SUCCESS; }
 aclError aclmdlAddDatasetBuffer(aclmdlDataset* d, aclDataBuffer* b) { d->buffers.push_back(b); return ACL_SUCCESS; }
-aclError aclmdlLoadFromFile(const char*, uint32_t* id) { *id = fake::next_model++; return ACL_SUCCESS; }
+aclError aclmdlLoadFromFile(const char* path, uint32_t* id) {
+    *id = fake::next_model++;
+    fake::batch_sizes[*id] = std::string(path).find("b4") == std::string::npos ? 1 : 4;
+    return ACL_SUCCESS;
+}
 aclError aclmdlUnload(uint32_t) { return ACL_SUCCESS; }
 aclmdlDesc* aclmdlCreateDesc() { return new aclmdlDesc; }
 aclError aclmdlDestroyDesc(aclmdlDesc* p) { delete p; return ACL_SUCCESS; }
@@ -125,14 +131,18 @@ size_t aclmdlGetNumInputs(const aclmdlDesc*) { return 1; }
 size_t aclmdlGetNumOutputs(const aclmdlDesc*) { return 1; }
 int aclmdlGetInputDataType(const aclmdlDesc*, size_t) { return ACL_FLOAT; }
 int aclmdlGetOutputDataType(const aclmdlDesc*, size_t) { return ACL_FLOAT; }
-aclError aclmdlGetInputDims(const aclmdlDesc*, size_t, aclmdlIODims* d) {
-    *d = {2, {1, 2}}; return ACL_SUCCESS;
+aclError aclmdlGetInputDims(const aclmdlDesc* desc, size_t, aclmdlIODims* d) {
+    *d = {2, {int64_t(fake::batch_sizes.at(desc->id)), 2}}; return ACL_SUCCESS;
 }
-aclError aclmdlGetOutputDims(const aclmdlDesc*, size_t, aclmdlIODims* d) {
-    *d = {2, {1, 2}}; return ACL_SUCCESS;
+aclError aclmdlGetOutputDims(const aclmdlDesc* desc, size_t, aclmdlIODims* d) {
+    *d = {2, {int64_t(fake::batch_sizes.at(desc->id)), 2}}; return ACL_SUCCESS;
 }
-size_t aclmdlGetInputSizeByIndex(const aclmdlDesc*, size_t) { return 2 * sizeof(float); }
-size_t aclmdlGetOutputSizeByIndex(const aclmdlDesc*, size_t) { return 2 * sizeof(float); }
+size_t aclmdlGetInputSizeByIndex(const aclmdlDesc* desc, size_t) {
+    return 2 * sizeof(float) * fake::batch_sizes.at(desc->id);
+}
+size_t aclmdlGetOutputSizeByIndex(const aclmdlDesc* desc, size_t) {
+    return 2 * sizeof(float) * fake::batch_sizes.at(desc->id);
+}
 const char* aclmdlGetInputNameByIndex(const aclmdlDesc*, size_t) { return "input"; }
 const char* aclmdlGetOutputNameByIndex(const aclmdlDesc*, size_t) { return "output"; }
 aclError aclmdlExecute(uint32_t, const aclmdlDataset* in, aclmdlDataset* out) {
@@ -155,7 +165,7 @@ int main() {
                           output[0].shape == std::vector<int64_t>({1, 2}) &&
                           output[0].data == std::vector<float>({2*x, 2*x+2}), "incorrect ACL output");
         };
-        Json cfg = {{"path", "fake.om"}, {"device_ids", {0}}};
+        Json cfg = {{"path", "fake.om"}, {"device_ids", {0}}, {"acl_async_stream", true}};
         {
             auto a = make_acl_engine(cfg, 0);
             auto b = make_acl_engine(cfg, 1);
@@ -190,12 +200,32 @@ int main() {
             verify(*b, 5);
         }
         fake::require(fake::streams == 0 && fake::pinned.empty(), "ACL stream/pinned buffers leaked");
+        cfg["path"] = "fake-b4.om";
+        cfg["batch_size"] = 4;
+        {
+            auto batched = make_acl_engine(cfg, 0);
+            fake::require(batched->fixed_batch_size() == 4, "static ACL batch dimension was lost");
+            const auto result = batched->run({{"input", {4, 2}, {1, 2, 3, 4, 5, 6, 7, 8}}});
+            fake::require(result.size() == 1 && result[0].shape == std::vector<int64_t>({4, 2}) &&
+                          result[0].data == std::vector<float>({2, 4, 6, 8, 10, 12, 14, 16}),
+                          "static B4 ACL result was not transferred correctly");
+        }
+        fake::require(fake::streams == 0 && fake::pinned.empty(), "batched ACL resources leaked");
+        cfg["path"] = "fake.om";
+        cfg.erase("batch_size");
         cfg["acl_async_stream"] = false;
         {
             auto legacy = make_acl_engine(cfg, 0);
             verify(*legacy, 9);
             fake::require(fake::streams == 0 && fake::sync_copies == 2,
                           "synchronous compatibility path not used");
+        }
+        cfg.erase("acl_async_stream");
+        {
+            auto default_engine = make_acl_engine(cfg, 0);
+            verify(*default_engine, 1);
+            fake::require(fake::streams == 0 && fake::sync_copies == 4,
+                          "default ACL mode must remain synchronous");
         }
         std::cout << "PASS: ACL stream ordering, pinned buffers, parallel instances and cleanup\n";
     } catch (const std::exception& e) {
