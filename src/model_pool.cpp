@@ -194,6 +194,7 @@ struct ModelRegistry::Impl {
             }
         }
         Json infer(const Image& image, const std::string& prompt) {
+            throw_if_cancelled();
             if (batching) {
                 auto request = std::make_shared<Request>();
                 request->input = {&image, prompt};
@@ -204,14 +205,22 @@ struct ModelRegistry::Impl {
                     throw std::runtime_error("model batch queue is full");
                 queue.push_back(request);
                 ready.notify_all();
-                if (!ready.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return request->started; })) {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+                while (!request->started && !cancellation_requested() &&
+                       std::chrono::steady_clock::now() < deadline)
+                    ready.wait_until(lock, std::min(deadline,
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(20)));
+                if (!request->started) {
                     auto it = std::find(queue.begin(), queue.end(), request);
                     if (it != queue.end()) queue.erase(it);
                     lock.unlock(); ready.notify_all();
+                    throw_if_cancelled();
                     throw std::runtime_error("model batch queue acquisition timed out");
                 }
                 lock.unlock();
-                return result.get();
+                auto response = result.get(); // Worker still owns the input image until this returns.
+                throw_if_cancelled();
+                return response;
             }
             std::unique_lock<std::mutex> lock(mutex);
             if (scalar_queue.size() >= size_t(max_pending))
@@ -234,13 +243,17 @@ struct ModelRegistry::Impl {
                 ++window_pressure;
                 ++pressure_total;
             }
-            if (!ready.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
-                return next_admissible() == ticket;
-            })) {
-                if (adaptive) ++acquisition_timeout_total;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            while (next_admissible() != ticket && !cancellation_requested() &&
+                   std::chrono::steady_clock::now() < deadline)
+                ready.wait_until(lock, std::min(deadline,
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(20)));
+            if (next_admissible() != ticket || cancellation_requested()) {
+                if (adaptive && !cancellation_requested()) ++acquisition_timeout_total;
                 scalar_queue.erase(std::find_if(scalar_queue.begin(), scalar_queue.end(),
                     [&](const ScalarWaiter& waiter) { return waiter.ticket == ticket; }));
                 lock.unlock(); ready.notify_all();
+                throw_if_cancelled();
                 throw std::runtime_error("model instance acquisition timed out");
             }
             auto selected = std::find_if(scalar_queue.begin(), scalar_queue.end(),
@@ -265,7 +278,12 @@ struct ModelRegistry::Impl {
                     pool.ready.notify_all();
                 }
             } lease{*this, index};
-            if (!adaptive) return models[index]->infer(image, prompt);
+            if (!adaptive) {
+                throw_if_cancelled();
+                auto response = models[index]->infer(image, prompt);
+                throw_if_cancelled();
+                return response;
+            }
             const auto start = std::chrono::steady_clock::now();
             bool failed = false, overloaded = false;
             struct Feedback {
@@ -279,7 +297,12 @@ struct ModelRegistry::Impl {
                                   failed ? 0 : pool.models[index]->last_usage_tokens());
                 }
             } feedback{*this, tokens, index, failed, overloaded, start};
-            try { return models[index]->infer(image, prompt); }
+            try {
+                throw_if_cancelled();
+                auto response = models[index]->infer(image, prompt);
+                throw_if_cancelled();
+                return response;
+            }
             catch (const HttpStatusError& e) {
                 failed = true;
                 overloaded = e.status == 429 || e.status == 503;

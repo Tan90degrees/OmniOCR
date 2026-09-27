@@ -73,7 +73,13 @@ Json HttpClient::post(const Json& payload) {
     curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, long(settings.value("connect_timeout_seconds", 10)));
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, long(settings.value("timeout_seconds", 120)));
     curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION,
+        +[](void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+            return cancellation_requested() ? 1 : 0;
+        });
     const auto rc = curl_easy_perform(curl.get());
+    if (rc == CURLE_ABORTED_BY_CALLBACK && cancellation_requested()) throw Cancelled();
     if (rc != CURLE_OK) throw std::runtime_error(std::string("HTTP transport failed: ") + curl_easy_strerror(rc));
     long status = 0; curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
     if (status < 200 || status >= 300) throw HttpStatusError(status);

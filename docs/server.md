@@ -90,9 +90,31 @@ curl -H "Authorization: Bearer $OCR_API_KEY" \
   'http://127.0.0.1:8080/v1/jobs/<job-id>/result?format=markdown'
 ```
 
-状态可能为 `queued`、`reading`、`processing`、`finalizing`、`succeeded` 或 `failed`。还返回 `priority`、`pages_queued`、`pages_completed`、`error` 和结果链接。结果只在 succeeded 后可用，未就绪返回 409、未知任务返回 404。结果 JSON/Markdown 与现有 CLI 保持同一格式。Markdown 的相对图片路径可映射到 `GET /v1/jobs/<job-id>/assets/<filename.png>`。 `GET /healthz` 仅检测 HTTP 服务存活，不代表 NPU 或远端 vLLM 健康。
+状态可能为 `queued`、`reading`、`processing`、`finalizing`、`cancelling`、`cancelled`、`succeeded` 或 `failed`。还返回 `priority`、`pages_queued`、`pages_completed`、`error`、`source_name`、`source_type`（`upload`/`path`）、上传文件的 `source_bytes` 和结果链接。结果只在 succeeded 后可用，未就绪或取消后返回 409、未知任务返回 404。结果 JSON/Markdown 与现有 CLI 保持同一格式。Markdown 的相对图片路径可映射到 `GET /v1/jobs/<job-id>/assets/<filename.png>`。 `GET /healthz` 仅检测 HTTP 服务存活，不代表 NPU 或远端 vLLM 健康。
 
-`GET /v1/metrics` 返回受相同 API key 保护的 JSON 快照：`active_jobs`、`reserved_jobs`、`queued_documents`、`queued_pages`、`queued_page_bytes`、`reserved_page_bytes`、`inflight_upload_bytes` 以及 `admitted_total`、`succeeded_total`、`failed_total`、`rejected_total`。已接受任务满足 `admitted_total = succeeded_total + failed_total + active_jobs`；预留请求另见 `reserved_jobs`。计数器只覆盖当前进程，重启后清零，不是 Prometheus 文本格式。429 和累计容量 503 均计入 `rejected_total`。
+## 列表、中断与文件管理
+
+| 接口 | 行为 |
+|---|---|
+| `GET /v1/jobs?limit=50&offset=0&status=queued` | 按接收顺序列出任务；`limit` 范围 1–200，`offset` 范围 0–1000000，`status` 可省略；返回 `items/total/limit/offset` |
+| `POST /v1/jobs/<job-id>/cancel` | 对活跃任务请求取消；已完全停止返回 200 `cancelled`，仍有操作待结束返回 202 `cancelling`；重复取消幂等，成功/失败任务返回 409 |
+| `GET /v1/jobs/<job-id>/source` | 下载本服务管理的上传源文件；服务器路径提交的源文件不通过此接口暴露（409） |
+| `DELETE /v1/jobs/<job-id>` | 仅终态且没有运行中的工作时返回 204；移除状态、上传原件、结果及图片。活跃任务先取消并等待 `cancelled`，否则返回 409；服务器路径提交的外部原件永不删除 |
+
+```bash
+curl -X POST -H "Authorization: Bearer $OCR_API_KEY" \
+  http://127.0.0.1:8080/v1/jobs/<job-id>/cancel
+curl -H "Authorization: Bearer $OCR_API_KEY" \
+  'http://127.0.0.1:8080/v1/jobs?limit=20&offset=0'
+curl -H "Authorization: Bearer $OCR_API_KEY" \
+  http://127.0.0.1:8080/v1/jobs/<job-id>/source -o source.pdf
+curl -X DELETE -H "Authorization: Bearer $OCR_API_KEY" \
+  http://127.0.0.1:8080/v1/jobs/<job-id>
+```
+
+取消会清除尚未开始的文档/页面任务，BOX 与模型等待最多约 20 ms 后感知；转换子进程组被终止，内置 HTTP/vLLM 请求使用传输回调退出。已提交的 ACL/ONNX 原生推理及混合了其他任务的原生批量推理不会强行破坏设备上下文，会在当前调用完成后停止后续工作。`cancelled` 表示此任务的 reader/page/finalizer 已退出；输出清理失败时 `error` 会追加错误，可使用 DELETE 重试删除；后端收到请求后是否仍计费或继续服务端生成，取决于该后端。正在上传但尚未得到任务 ID 的连接断开会释放预留并删除暂存文件。仅内存中的任务索引不会在重启后恢复；重启前残留的磁盘目录需由运维管理。接口沿用服务的 Bearer token，建议限制谁可执行删除操作。
+
+`GET /v1/metrics` 返回受相同 API key 保护的 JSON 快照：`active_jobs`、`reserved_jobs`、`queued_documents`、`queued_pages`、`queued_page_bytes`、`reserved_page_bytes`、`inflight_upload_bytes` 以及 `admitted_total`、`succeeded_total`、`failed_total`、`cancelled_total`、`rejected_total`。已接受任务满足 `admitted_total = succeeded_total + failed_total + cancelled_total + active_jobs`；预留请求另见 `reserved_jobs`。计数器只覆盖当前进程，重启后清零，不是 Prometheus 文本格式。429 和累计容量 503 均计入 `rejected_total`。
 
 ## 调度和部署边界
 
@@ -102,7 +124,7 @@ curl -H "Authorization: Bearer $OCR_API_KEY" \
 
 可在[模型池配置](configuration.md#模型池)里为每个模型设置 `batch_size` 和 `max_batch_wait_ms`。相同模型 ID 的跨文件、跨页 BOX 可共同组成一次原生批量推理；`max_concurrent_requests` 是同时运行的批次数上限。单页多 BOX + 单套 vLLM 服务可用 `instances: 1, max_concurrent_requests: 8`，并在配置中设置 `execution.page_workers: 4`、`box_workers: 8`、`document_workers: 4`；即使仅有 1 页在 OCR 阶段，也能向后端发出最多 8 个 BOX 请求。vLLM 的客户端 `batch_size` 保持 1，具体并行度取决于 BOX 数和服务端容量。等待组批的页面仍计入 `page-workers` 并持有裁剪图像，不能只按已就绪页队列的字节上限估算进程内存。
 
-本版单进程的任务状态仅在内存中，原始文件与成功输出保留在 data-dir 中；服务重启不会自动恢复旧任务，`max-jobs` 是进程生命周期内累计接受的任务上限。尚不支持删除/取消、运行中更改优先级、持久化队列、跨节点/多租户调度或幂等键。模型初始化在服务启动时进行。
+本版单进程的任务状态仅在内存中，上传文件与成功输出保留在 data-dir 中直至显式删除；服务重启不会自动恢复旧任务，`max-jobs` 是进程生命周期内累计接受的任务上限，即使删除任务也不会重置。尚不支持运行中更改优先级、持久化队列、跨节点/多租户调度或幂等键。模型初始化在服务启动时进行。
 
 ARM64 离线包在启用服务端构建的工作流通过后包含 `server.sh`，但不包含 CANN、NPU 驱动、模型权重或 vLLM 服务。310P3 + DocLayout + OvisOCR2 的服务器实机并发、长稳尚未验收；此前的 [ACL 退出 SIGSEGV 记录](https://github.com/Tan90degrees/OmniOCR/issues/2) 在用户最新测试中未再复现。
 

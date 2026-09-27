@@ -63,7 +63,8 @@ int number(const Json& item, const char* key, int fallback, int lower, int upper
         throw std::runtime_error(std::string(key) + " must be an integer");
     if (value.is_number_unsigned()) {
         const uint64_t n = value.get<uint64_t>();
-        if (n > uint64_t(upper)) throw std::runtime_error(std::string(key) + " out of range");
+        if (n < uint64_t(std::max(0, lower)) || n > uint64_t(upper))
+            throw std::runtime_error(std::string(key) + " out of range");
         return int(n);
     }
     const int64_t n = value.get<int64_t>();
@@ -83,7 +84,8 @@ MHD_Result respond(MHD_Connection* connection, unsigned status, const std::strin
     auto* response = MHD_create_response_from_buffer(body.size(), const_cast<char*>(body.data()),
                                                       MHD_RESPMEM_MUST_COPY);
     if (!response) return MHD_NO;
-    MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, type);
+    if (status != MHD_HTTP_NO_CONTENT)
+        MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, type);
     MHD_add_response_header(response, "Cache-Control", "no-store");
     if (retry_after) MHD_add_response_header(response, "Retry-After", retry_after);
     const auto result = MHD_queue_response(connection, status, response);
@@ -138,6 +140,10 @@ class ServerScheduler {
         std::string id;
         fs::path input, output;
         std::string state = "queued", error;
+        CancellationToken cancel = std::make_shared<std::atomic<bool>>(false);
+        bool uploaded = false, reader_running = false, finalizer_running = false;
+        bool cleanup_queued = false, deleting = false;
+        size_t pages_running = 0;
         int priority = 0, pages_completed = 0, pages_queued = 0;
         uint64_t sequence = 0;
         size_t upload_bytes = 0;
@@ -168,39 +174,94 @@ class ServerScheduler {
     std::map<std::string, std::shared_ptr<Job>> jobs_;
     std::set<std::string> reservations_;
     size_t active_jobs_ = 0, inflight_upload_bytes_ = 0;
-    uint64_t admitted_ = 0, succeeded_ = 0, failed_ = 0, rejected_ = 0;
+    uint64_t admitted_ = 0, succeeded_ = 0, failed_ = 0, cancelled_ = 0, rejected_ = 0;
     // Completed jobs remain queryable, but never participate in scheduling.
     std::priority_queue<std::shared_ptr<Job>, std::vector<std::shared_ptr<Job>>, JobPriority> waiting_;
     std::deque<Pending> pages_;
     size_t queued_page_bytes_ = 0, reserved_page_bytes_ = 0, reserved_pages_ = 0;
     std::vector<std::thread> threads_;
+    std::thread cleanup_thread_;
+    std::deque<std::shared_ptr<Job>> cleanup_queue_;
+    bool cleanup_shutdown_ = false;
     uint64_t sequence_ = 0;
     bool shutdown_ = false;
 
-    void fail_locked(const std::shared_ptr<Job>& job, const std::string& message) {
-        if (job->state == "succeeded" || job->state == "failed") return;
-        job->state = "failed";
-        ++failed_;
-        --active_jobs_;
-        inflight_upload_bytes_ -= job->upload_bytes;
-        job->error = message;
+    static bool terminal(const std::string& state) {
+        return state == "succeeded" || state == "failed" || state == "cancelled";
+    }
+    Json status_locked(const Job& j) const {
+        return {{"id", j.id}, {"status", j.state}, {"priority", j.priority},
+                {"pages_queued", j.pages_queued}, {"pages_completed", j.pages_completed},
+                {"error", j.error}, {"source_name", j.input.filename().string()},
+                {"source_type", j.uploaded ? "upload" : "path"},
+                {"source_bytes", j.uploaded ? j.upload_bytes : 0},
+                {"result_url", "/v1/jobs/" + j.id + "/result"},
+                {"markdown_url", "/v1/jobs/" + j.id + "/result?format=markdown"}};
+    }
+    bool finish_cancel_locked(const std::shared_ptr<Job>& job) {
+        if (job->state != "cancelling" || job->reader_running || job->pages_running ||
+            job->finalizer_running || job->cleanup_queued)
+            return false;
         job->pages.clear();
+        job->cleanup_queued = true;
+        cleanup_queue_.push_back(job);
+        changed_.notify_all();
+        return true;
+    }
+    void cleanup_worker() {
+        while (true) {
+            std::shared_ptr<Job> job;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                changed_.wait(lock, [&] { return cleanup_shutdown_ || !cleanup_queue_.empty(); });
+                if (cleanup_shutdown_ && cleanup_queue_.empty()) return;
+                job = std::move(cleanup_queue_.front());
+                cleanup_queue_.pop_front();
+            }
+            std::error_code error;
+            fs::remove_all(job->output, error);
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                if (error) job->error += "; output cleanup failed: " + error.message();
+                job->state = "cancelled";
+                ++cancelled_;
+                --active_jobs_;
+                inflight_upload_bytes_ -= job->upload_bytes;
+            }
+            changed_.notify_all();
+        }
+    }
+    void discard_pages_locked(const std::shared_ptr<Job>& job) {
         pages_.erase(std::remove_if(pages_.begin(), pages_.end(),
             [&](const Pending& page) {
                 if (page.job != job) return false;
                 queued_page_bytes_ -= page.image.rgb.size();
                 return true;
             }), pages_.end());
+    }
+
+    void fail_locked(const std::shared_ptr<Job>& job, const std::string& message) {
+        if (terminal(job->state) || job->state == "cancelling") return;
+        job->state = "failed";
+        job->cancel->store(true, std::memory_order_relaxed);
+        ++failed_;
+        --active_jobs_;
+        inflight_upload_bytes_ -= job->upload_bytes;
+        job->error = message;
+        job->pages.clear();
+        discard_pages_locked(job);
         changed_.notify_all();
     }
     bool finalize_locked(const std::shared_ptr<Job>& job, Document& output) {
         if (!job->reader_done || job->outstanding || job->state == "failed" ||
-            job->state == "finalizing" || job->state == "succeeded") return false;
+            job->state == "cancelling" || terminal(job->state) ||
+            job->state == "finalizing") return false;
         if (job->pages.empty()) {
             fail_locked(job, "document produced no pages");
             return false;
         }
         job->state = "finalizing";
+        job->finalizer_running = true;
         output.source = job->source;
         for (auto& entry : job->pages) output.pages.push_back(std::move(entry.second));
         job->pages.clear();
@@ -210,15 +271,18 @@ class ServerScheduler {
         try {
             write_outputs(doc, job->output, "both", schema_version_);
             std::lock_guard<std::mutex> guard(mutex_);
+            job->finalizer_running = false;
             if (job->state == "finalizing") {
                 job->state = "succeeded";
                 ++succeeded_;
                 --active_jobs_;
                 inflight_upload_bytes_ -= job->upload_bytes;
-            }
+            } else finish_cancel_locked(job);
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> guard(mutex_);
+            job->finalizer_running = false;
             fail_locked(job, e.what());
+            finish_cancel_locked(job);
         }
         changed_.notify_all();
     }
@@ -231,21 +295,25 @@ class ServerScheduler {
                 if (shutdown_) return;
                 job = waiting_.top();
                 waiting_.pop();
+                if (job->state != "queued") continue;
                 job->state = "reading";
+                job->reader_running = true;
             }
+            CancellationScope scope(job->cancel.get());
             try {
                 read_document(job->input, document_settings_, [&](int number, const Image& image) {
+                    throw_if_cancelled();
                     const size_t bytes = image.rgb.size();
                     if (bytes > options_.max_queued_page_bytes)
                         throw std::runtime_error("rendered page exceeds queued page byte limit");
                     std::unique_lock<std::mutex> lock(mutex_);
                     changed_.wait(lock, [&] {
-                        return shutdown_ || job->state == "failed" ||
+                        return shutdown_ || job->state == "failed" || job->state == "cancelling" ||
                                (pages_.size() + reserved_pages_ < size_t(options_.max_queued_pages) &&
                                 bytes <= options_.max_queued_page_bytes -
                                          queued_page_bytes_ - reserved_page_bytes_);
                     });
-                    if (shutdown_ || job->state == "failed")
+                    if (shutdown_ || job->state == "failed" || job->state == "cancelling")
                         throw std::runtime_error("document processing cancelled");
                     // Reserve capacity, then copy the image without holding the
                     // global scheduler lock. Reader-owned images are not movable.
@@ -265,7 +333,7 @@ class ServerScheduler {
                     lock.lock();
                     --reserved_pages_;
                     reserved_page_bytes_ -= bytes;
-                    if (shutdown_ || job->state == "failed") {
+                    if (shutdown_ || job->state == "failed" || job->state == "cancelling") {
                         lock.unlock();
                         changed_.notify_all();
                         throw std::runtime_error("document processing cancelled");
@@ -288,15 +356,21 @@ class ServerScheduler {
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     job->reader_done = true;
+                    job->reader_running = false;
                     ready = finalize_locked(job, done);
+                    finish_cancel_locked(job);
                 }
                 if (ready) finalize(job, done);
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                job->reader_running = false;
                 fail_locked(job, e.what());
+                finish_cancel_locked(job);
             } catch (...) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                job->reader_running = false;
                 fail_locked(job, "unknown document reader error");
+                finish_cancel_locked(job);
             }
         }
     }
@@ -320,8 +394,10 @@ class ServerScheduler {
             changed_.notify_all();
             {
                 std::lock_guard<std::mutex> guard(mutex_);
-                if (work.job->state == "failed") continue;
+                if (terminal(work.job->state) || work.job->state == "cancelling") continue;
+                ++work.job->pages_running;
             }
+            bool counted = true;
             try {
                 // BOX work uses a separate fixed pool so one page can expose
                 // several regions concurrently without page_workers * box_workers
@@ -330,26 +406,35 @@ class ServerScheduler {
                     pipeline_.process_page(work.number, work.image, work.job->output,
                         options_.box_workers, [this](std::function<void()> task) {
                             return box_pool_.submit(std::move(task));
-                        }) :
-                    pipeline_.process_page(work.number, work.image, work.job->output, 1);
+                        }, work.job->cancel) :
+                    pipeline_.process_page(work.number, work.image, work.job->output, 1, {}, work.job->cancel);
                 Document done;
                 bool ready;
                 {
                     std::lock_guard<std::mutex> guard(mutex_);
-                    if (work.job->state == "failed") continue;
-                    if (!work.job->pages.emplace(work.number, std::move(page)).second)
-                        throw std::runtime_error("duplicate PDF page number");
-                    ++work.job->pages_completed;
-                    --work.job->outstanding;
-                    ready = finalize_locked(work.job, done);
+                    --work.job->pages_running;
+                    counted = false;
+                    ready = false;
+                    if (work.job->state != "cancelling" && !terminal(work.job->state)) {
+                        if (!work.job->pages.emplace(work.number, std::move(page)).second)
+                            throw std::runtime_error("duplicate PDF page number");
+                        ++work.job->pages_completed;
+                        --work.job->outstanding;
+                        ready = finalize_locked(work.job, done);
+                    }
+                    finish_cancel_locked(work.job);
                 }
                 if (ready) finalize(work.job, done);
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> guard(mutex_);
+                if (counted) --work.job->pages_running;
                 fail_locked(work.job, e.what());
+                finish_cancel_locked(work.job);
             } catch (...) {
                 std::lock_guard<std::mutex> guard(mutex_);
+                if (counted) --work.job->pages_running;
                 fail_locked(work.job, "unknown page inference error");
+                finish_cancel_locked(work.job);
             }
         }
     }
@@ -367,13 +452,16 @@ public:
                 threads_.emplace_back([this] { page_worker(); });
             for (int i = 0; i < options_.document_workers; ++i)
                 threads_.emplace_back([this] { reader(); });
+            cleanup_thread_ = std::thread([this] { cleanup_worker(); });
         } catch (...) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 shutdown_ = true;
+                cleanup_shutdown_ = true;
             }
             changed_.notify_all();
             for (auto& thread : threads_) thread.join();
+            if (cleanup_thread_.joinable()) cleanup_thread_.join();
             throw;
         }
     }
@@ -384,6 +472,9 @@ public:
         }
         changed_.notify_all();
         for (auto& worker : threads_) worker.join();
+        { std::lock_guard<std::mutex> guard(mutex_); cleanup_shutdown_ = true; }
+        changed_.notify_all();
+        if (cleanup_thread_.joinable()) cleanup_thread_.join();
     }
     fs::path staging(const std::string& id) {
         const auto dir = options_.data_dir / "jobs" / id;
@@ -393,7 +484,7 @@ public:
     }
     std::string reserve() {
         std::lock_guard<std::mutex> guard(mutex_);
-        if (jobs_.size() + reservations_.size() >= options_.max_jobs) {
+        if (admitted_ + reservations_.size() >= options_.max_jobs) {
             ++rejected_;
             throw CapacityError(MHD_HTTP_SERVICE_UNAVAILABLE, "cumulative job limit reached");
         }
@@ -424,12 +515,14 @@ public:
         inflight_upload_bytes_ += bytes;
         return true;
     }
-    void submit(const std::string& id, const fs::path& input, int priority, size_t upload_bytes = 0) {
+    void submit(const std::string& id, const fs::path& input, int priority,
+                size_t upload_bytes = 0, bool uploaded = false) {
         auto job = std::make_shared<Job>();
         job->id = id; job->input = input;
         job->output = options_.data_dir / "jobs" / id / "output";
         job->priority = priority;
         job->upload_bytes = upload_bytes;
+        job->uploaded = uploaded;
         job->source = fs::absolute(input).string();
         {
             std::lock_guard<std::mutex> guard(mutex_);
@@ -455,11 +548,73 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         auto item = jobs_.find(id);
         if (item == jobs_.end()) throw std::out_of_range("job not found");
-        const auto& j = *item->second;
-        return {{"id", j.id}, {"status", j.state}, {"priority", j.priority},
-                {"pages_queued", j.pages_queued}, {"pages_completed", j.pages_completed},
-                {"error", j.error}, {"result_url", "/v1/jobs/" + id + "/result"},
-                {"markdown_url", "/v1/jobs/" + id + "/result?format=markdown"}};
+        if (item->second->deleting) throw std::logic_error("job deletion in progress");
+        return status_locked(*item->second);
+    }
+    Json list(int offset, int limit, const std::string& state) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        std::vector<std::shared_ptr<Job>> entries;
+        for (const auto& [id, job] : jobs_)
+            if (!job->deleting && (state.empty() || job->state == state)) entries.push_back(job);
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            return a->sequence < b->sequence;
+        });
+        Json items = Json::array();
+        for (size_t i = size_t(offset); i < entries.size() && items.size() < size_t(limit); ++i)
+            items.push_back(status_locked(*entries[i]));
+        return {{"items", items}, {"total", entries.size()}, {"offset", offset}, {"limit", limit}};
+    }
+    Json cancel(const std::string& id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        const auto it = jobs_.find(id);
+        if (it == jobs_.end()) throw std::out_of_range("job not found");
+        auto job = it->second;
+        if (job->deleting) throw std::logic_error("job deletion in progress");
+        if (job->state == "cancelled" || job->state == "cancelling") return status_locked(*job);
+        if (terminal(job->state)) throw std::logic_error("completed job cannot be cancelled");
+        job->cancel->store(true, std::memory_order_relaxed);
+        job->state = "cancelling";
+        job->error = "cancelled by request";
+        job->pages.clear();
+        discard_pages_locked(job);
+        decltype(waiting_) retained;
+        while (!waiting_.empty()) {
+            auto next = waiting_.top(); waiting_.pop();
+            if (next != job) retained.push(std::move(next));
+        }
+        waiting_.swap(retained);
+        finish_cancel_locked(job);
+        changed_.notify_all();
+        return status_locked(*job);
+    }
+    void remove(const std::string& id) {
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            const auto it = jobs_.find(id);
+            if (it == jobs_.end()) throw std::out_of_range("job not found");
+            const auto& job = it->second;
+            if (job->deleting || !terminal(job->state) || job->reader_running ||
+                job->pages_running || job->finalizer_running)
+                throw std::logic_error("job is still active or deletion is in progress");
+            job->deleting = true;
+        }
+        // Delete only the owned staging directory, never the submitted external path.
+        try { fs::remove_all(options_.data_dir / "jobs" / id); }
+        catch (...) {
+            std::lock_guard<std::mutex> guard(mutex_);
+            jobs_.at(id)->deleting = false;
+            throw;
+        }
+        std::lock_guard<std::mutex> guard(mutex_);
+        jobs_.erase(id);
+    }
+    fs::path source_file(const std::string& id) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        const auto it = jobs_.find(id);
+        if (it == jobs_.end()) throw std::out_of_range("job not found");
+        if (it->second->deleting) throw std::logic_error("job deletion in progress");
+        if (!it->second->uploaded) throw std::logic_error("path-based source is not managed by the service");
+        return it->second->input;
     }
     Json metrics() {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -469,13 +624,15 @@ public:
                 {"reserved_page_bytes", reserved_page_bytes_},
                 {"inflight_upload_bytes", inflight_upload_bytes_},
                 {"admitted_total", admitted_}, {"succeeded_total", succeeded_},
-                {"failed_total", failed_}, {"rejected_total", rejected_},
+                {"failed_total", failed_}, {"cancelled_total", cancelled_},
+                {"rejected_total", rejected_},
                 {"models", pipeline_.model_metrics()}};
     }
     fs::path result_file(const std::string& id, const std::string& format) {
         std::lock_guard<std::mutex> guard(mutex_);
         auto it = jobs_.find(id);
         if (it == jobs_.end()) throw std::out_of_range("job not found");
+        if (it->second->deleting) throw std::logic_error("job deletion in progress");
         if (it->second->state != "succeeded") throw std::logic_error("result is not ready");
         if (format == "json") return it->second->output / "result.json";
         if (format == "markdown") return it->second->output / "result.md";
@@ -489,6 +646,7 @@ public:
         std::lock_guard<std::mutex> guard(mutex_);
         auto it = jobs_.find(id);
         if (it == jobs_.end()) throw std::out_of_range("job not found");
+        if (it->second->deleting) throw std::logic_error("job deletion in progress");
         if (it->second->state != "succeeded") throw std::logic_error("result is not ready");
         return it->second->output / "assets" / name;
     }
@@ -620,7 +778,7 @@ struct Http {
                     request->file.close();
                     if (!request->file) throw std::runtime_error("uploaded file flush failed");
                     if (!request->bytes) throw std::runtime_error("empty upload");
-                    scheduler.submit(request->id, request->spool, request->priority, request->bytes);
+                    scheduler.submit(request->id, request->spool, request->priority, request->bytes, true);
                     request->submitted = true;
                     return respond(conn, MHD_HTTP_ACCEPTED,
                         Json{{"id", request->id}, {"status", "queued"},
@@ -647,7 +805,25 @@ struct Http {
             return respond(conn, MHD_HTTP_OK, R"({"status":"ok"})");
         if (method == "GET" && url == "/v1/metrics")
             return respond(conn, MHD_HTTP_OK, scheduler.metrics().dump());
-        if (method != "GET") return failure(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "unsupported method");
+        if (method == "GET" && url == "/v1/jobs") {
+            try {
+                const auto query_number = [&](const char* key, int fallback, int low, int high) {
+                    const char* value = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, key);
+                    return value ? number({{key, Json::parse(value)}}, key, fallback, low, high) : fallback;
+                };
+                const int offset = query_number("offset", 0, 0, 1000000);
+                const int limit = query_number("limit", 50, 1, 200);
+                const char* filter = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "status");
+                const std::string state = filter ? filter : "";
+                if (!state.empty() && !std::set<std::string>{"queued", "reading", "processing",
+                    "finalizing", "cancelling", "cancelled", "succeeded", "failed"}.count(state))
+                    throw std::runtime_error("invalid status filter");
+                return respond(conn, MHD_HTTP_OK, scheduler.list(offset, limit, state).dump());
+            } catch (const std::exception& e) {
+                return failure(conn, MHD_HTTP_BAD_REQUEST, e.what());
+            }
+        }
+        if (*size) { *size = 0; return failure(conn, MHD_HTTP_BAD_REQUEST, "request body not supported"); }
         const std::string prefix = "/v1/jobs/";
         if (url.compare(0, prefix.size(), prefix) != 0)
             return failure(conn, MHD_HTTP_NOT_FOUND, "not found");
@@ -658,9 +834,24 @@ struct Http {
             !std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isxdigit(c); }))
             return failure(conn, MHD_HTTP_BAD_REQUEST, "invalid job ID");
         try {
-            if (slash == std::string::npos)
-                return respond(conn, MHD_HTTP_OK, scheduler.status(id).dump());
+            if (slash == std::string::npos) {
+                if (method == "GET") return respond(conn, MHD_HTTP_OK, scheduler.status(id).dump());
+                if (method == "DELETE") {
+                    scheduler.remove(id);
+                    return respond(conn, MHD_HTTP_NO_CONTENT, "");
+                }
+                return failure(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "unsupported method");
+            }
             const std::string subpath = tail.substr(slash);
+            if (subpath == "/cancel" && method == "POST") {
+                auto state = scheduler.cancel(id);
+                const bool done = state.at("status") == "cancelled";
+                return respond(conn, done ? MHD_HTTP_OK : MHD_HTTP_ACCEPTED, state.dump());
+            }
+            if (method != "GET") return failure(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "unsupported method");
+            if (subpath == "/source")
+                return respond_file(conn, scheduler.source_file(id), scheduler.options().max_upload_bytes,
+                                    "application/octet-stream");
             if (subpath == "/result") {
                 const char* format = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "format");
                 const std::string kind = format ? format : "json";

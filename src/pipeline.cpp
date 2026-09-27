@@ -14,7 +14,9 @@ Pipeline::Pipeline(Json config, ModelFactory factory) : config_(normalize_config
     models_ = std::make_unique<ModelRegistry>(config_.at("models"), std::move(factory));
 }
 Page Pipeline::process_page(int number, const Image& image, const fs::path& output_dir,
-                            int box_workers, const BoxSubmit& submit) {
+                            int box_workers, const BoxSubmit& submit, const CancellationToken& cancel) {
+    CancellationScope page_scope(cancel.get());
+    throw_if_cancelled();
     const auto execution = config_.value("execution", Json::object());
     const auto& layout = config_.at("layout");
     const auto& routes = config_.at("routes");
@@ -35,8 +37,10 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         std::atomic<size_t> next{0}; std::atomic<bool> stop{false};
         std::exception_ptr error; std::mutex error_mutex;
         auto work_one = [&](size_t i) {
+            CancellationScope box_scope(cancel.get());
             Region& region = page.regions[i];
             try {
+                throw_if_cancelled();
                 region.box = boxes[i];
                 const Json* route = nullptr;
                 if (routes.contains(region.box.type)) route = &routes.at(region.box.type);
@@ -66,6 +70,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                     for (const auto& candidate : candidates) {
                         try {
                             auto result = models_->infer(candidate, crop, route->value("prompt", "Text Recognition:"));
+                            throw_if_cancelled();
                             // A candidate is successful only after task-specific adapter decoding.
                             // Malformed model output is handled by the same candidate fallback.
                             auto decoded = decode_recognition(result, *route, region.box.type);
@@ -78,13 +83,18 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                             else region.model = route->value("binding_id", candidate);
                             recognized = true;
                             break;
-                        } catch (const std::exception& e) {
+                        } catch (const Cancelled&) { throw; }
+                        catch (const std::exception& e) {
                             if (!failures.empty()) failures += "; ";
                             failures += candidate + ": " + e.what();
                         }
                     }
                     if (!recognized) throw std::runtime_error("all recognition models failed: " + failures);
                 }
+            } catch (const Cancelled&) {
+                std::lock_guard<std::mutex> lock(error_mutex);
+                if (!error) error = std::current_exception();
+                stop = true;
             } catch (const std::exception& e) {
                 if (record) region.error = e.what();
                 else { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error = std::current_exception(); stop = true; }
@@ -93,7 +103,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             }
         };
         auto work = [&] {
-            while (!stop.load()) {
+            while (!stop.load() && !cancellation_requested()) {
                 const size_t i = next.fetch_add(1);
                 if (i >= boxes.size()) break;
                 work_one(i);
@@ -104,6 +114,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         // and immediately joining another OS thread for every serial page.
         if (worker_count <= 1) {
             work();
+            throw_if_cancelled();
             if (error) std::rethrow_exception(error);
             return page;
         }
@@ -117,11 +128,11 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             std::condition_variable done;
             std::function<void()> task;
             task = [&] {
-                if (!stop.load()) {
+                if (!stop.load() && (!cancel || !cancel->load(std::memory_order_relaxed))) {
                     const size_t i = next.fetch_add(1);
                     if (i < boxes.size()) work_one(i);
                 }
-                if (!stop.load() && next.load() < boxes.size()) {
+                if (!stop.load() && (!cancel || !cancel->load(std::memory_order_relaxed)) && next.load() < boxes.size()) {
                     outstanding.fetch_add(1);
                     try { (void)submit(task); }
                     catch (...) {
@@ -147,6 +158,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             }
             std::unique_lock<std::mutex> lock(done_mutex);
             done.wait(lock, [&] { return outstanding.load() == 0; });
+            throw_if_cancelled();
             if (error) std::rethrow_exception(error);
             return page;
         }
@@ -155,6 +167,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         try { for (size_t i = 0; i < worker_count; ++i) threads.emplace_back(work); }
         catch (...) { stop = true; for (auto& t : threads) t.join(); throw; }
         for (auto& t : threads) t.join();
+        throw_if_cancelled();
         if (error) std::rethrow_exception(error);
     return page;
 }
