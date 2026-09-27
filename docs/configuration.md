@@ -78,6 +78,28 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
 
 `backend: vllm`，`endpoint` 填完整 `/v1/chat/completions` URL，`model` 必须匹配 served model name。可用 `api_key_env` 指定密钥环境变量，不把密钥写进配置。
 
+### 离线任务自适应并发
+
+可在单个 vLLM 模型（v2 为 `executors.<id>`）上设置 `adaptive_concurrency.enabled: true`。这条路径始终保持 `batch_size: 1`：每个 BOX 独立向 vLLM 发请求，vLLM 自己连续批处理不同图片/尺寸的请求。框架不按 BOX 数量等待凑批，也不把 BOX 张数当成 token 数。`max_concurrent_requests` 是预创建 HTTP 客户端及并发的硬上限；`execution.box_workers`（单文件 CLI 为 `execution.workers`）及页面供给量也必须足够大，控制器才能看到持续的队列需求。
+
+```json
+"ocr": {
+  "backend": "vllm", "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "model": "served-vlm", "instances": 1, "max_concurrent_requests": 32,
+  "batch_size": 1, "max_pending_requests": 256,
+  "adaptive_concurrency": {
+    "enabled": true, "min_concurrency": 1, "initial_concurrency": 4,
+    "window_ms": 1000, "min_samples": 8, "cooldown_ms": 2000,
+    "latency_target_ms": 0, "token_budget": 32768,
+    "image_pixels_per_token": 784, "expected_output_tokens": 512
+  }
+}
+```
+
+除 `enabled` 外字段均可省略，取上例的默认值（`initial_concurrency` 默认不超过硬上限）；`latency_target_ms: 0` 表示不设置绝对时延目标，仍会对吞吐下降且时延上升作出退避。每次租赁检查并发上限和在途 token 预算；单个估计超过预算的请求允许独占运行。队首大 BOX 暂时放不进预算时，小 BOX 最多越队四次，随后等待大 BOX 独占，避免大小混合负载的队首阻塞和大 BOX 饥饿。估计值按图片宽高、prompt 长度、固定开销及预期输出 token 计算，并用 vLLM 返回的 `usage.total_tokens` 缓慢校正；图片到视觉 token 的换算依赖模型的 resize/patch 规则，`image_pixels_per_token` 是**容量估计参数**，并非精确 token 计数。服务若不返回 usage，仍按静态估计运行。多个模型 ID 各自有控制器；若它们指向同一远端服务，token 预算不会跨 ID 共享。
+
+每个至少 `window_ms` 且有 `min_samples` 次完成的区间，控制器比较完成吞吐、平均后端时延与上一区间：在持续排队且吞吐明显改善时加倍并发上限，接近平台时每次试探增加一个槽位；时延超目标、错误比例较高或吞吐明显下降且时延上升时减少一个。HTTP 429/503 立即将当前上限减半（不低于 `min_concurrency`），并在 `cooldown_ms` 内暂停增并发；不自动重试失败请求。客户端仍受 `acquire_timeout_ms` 与 `max_pending_requests` 保护。`GET /v1/metrics` 的 `models.<id>` 展示当前并发上限、在途数、估计 token、队列长度、累计排队时长/超时次数、最近区间吞吐/平均后端时延和错误计数。固定并发仍为默认策略；自适应仅支持 vLLM，不能与原生组批或 `instance_overrides` 同时启用。无压测数据时无法保证任意模型都达到最大吞吐，建议从较宽的安全硬上限和设备可承受的 token 预算开始，再依据实际吞吐、P95/P99 与显存修改配置。
+
 `parameters` 可指定 `temperature`、`top_p`、`max_tokens` 及目标 vLLM 支持的扩展采样字段。框架固定 `stream=false`，总是发送 PNG data URL；模型名和 messages 不允许被 parameters 覆盖。`finish_reason=length` 按截断错误处理。
 
 `connect_timeout_seconds` 默认 10、`timeout_seconds` 默认 120、`max_response_bytes` 默认 16 MiB。TLS 校验保持开启；不自动跟随重定向。

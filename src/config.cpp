@@ -97,6 +97,36 @@ void validate_config(const Json& c) {
                                     "max_batch_wait_ms must be less than acquire_timeout_ms");
         const auto backend = m.at("backend").get<std::string>();
         require(has_backend(backend), "unknown backend plugin " + backend);
+        if (m.contains("adaptive_concurrency")) {
+            const auto& adaptive = m.at("adaptive_concurrency");
+            require(adaptive.is_object(), "adaptive_concurrency must be an object");
+            const std::set<std::string> fields = {"enabled", "min_concurrency", "initial_concurrency",
+                "window_ms", "min_samples", "cooldown_ms", "latency_target_ms", "token_budget",
+                "image_pixels_per_token", "expected_output_tokens"};
+            for (const auto& [key, value] : adaptive.items())
+                require(fields.count(key) != 0, "unknown adaptive_concurrency setting: " + key);
+            if (adaptive.contains("enabled"))
+                require(adaptive.at("enabled").is_boolean(), "adaptive_concurrency.enabled must be boolean");
+            bounded(adaptive, "min_concurrency", 1, 128);
+            bounded(adaptive, "initial_concurrency", 1, 128);
+            bounded(adaptive, "window_ms", 100, 60000);
+            bounded(adaptive, "min_samples", 1, 10000);
+            bounded(adaptive, "cooldown_ms", 0, 60000);
+            bounded(adaptive, "latency_target_ms", 0, 3600000);
+            bounded(adaptive, "token_budget", 1, 1000000000);
+            bounded(adaptive, "image_pixels_per_token", 1, 1000000);
+            bounded(adaptive, "expected_output_tokens", 1, 1000000);
+            if (adaptive.value("enabled", false)) {
+                require(backend == "vllm", "adaptive_concurrency requires vllm backend");
+                require(!needs_batch && overrides.empty(),
+                        "adaptive_concurrency requires batch_size 1 without instance_overrides");
+                const int ceiling = m.value("max_concurrent_requests", m.value("instances", 1));
+                const int minimum = adaptive.value("min_concurrency", 1);
+                const int initial = adaptive.value("initial_concurrency", std::min(4, ceiling));
+                require(minimum <= initial && initial <= ceiling,
+                        "adaptive_concurrency requires min <= initial <= max_concurrent_requests");
+            }
+        }
         if (backend == "vllm" || backend == "http_json") {
             const auto url = m.at("endpoint").get<std::string>();
             require(url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0, "endpoint must be an HTTP(S) URL");

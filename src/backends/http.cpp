@@ -76,7 +76,7 @@ Json HttpClient::post(const Json& payload) {
     const auto rc = curl_easy_perform(curl.get());
     if (rc != CURLE_OK) throw std::runtime_error(std::string("HTTP transport failed: ") + curl_easy_strerror(rc));
     long status = 0; curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
-    if (status < 200 || status >= 300) throw std::runtime_error("HTTP status " + std::to_string(status));
+    if (status < 200 || status >= 300) throw HttpStatusError(status);
     return Json::parse(response.body);
 }
 // Preserve the public one-shot helper for existing custom models.
