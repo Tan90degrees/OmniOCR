@@ -116,6 +116,7 @@ void v3_plugin_test() {
 }
 void v2_config_test() {
     Json c={{"version",2},
+        {"postprocess",{{"low_score",{{"enabled",true},{"threshold",.25}}}}},
         {"server",{{"port",18080},{"data_dir","service-state"}}},
         {"execution",{{"page_workers",2},{"box_workers",2},{"document_workers",2},{"max_queued_pages",4}}},
         {"executors",{
@@ -142,6 +143,7 @@ void v2_config_test() {
            runtime["execution"]["box_workers"]==2 && runtime["server"]["port"]==18080 &&
            runtime["layout"]["model"]=="layout_pool" &&
            runtime["routes"]["text"]["model"]=="ocr_pool" &&
+           runtime["postprocess"]["low_score"]["threshold"]==.25 &&
            runtime["routes"]["text"]["adapter"]=="vlm.ovisocr2",
            "v2 executor sharing and adapter binding");
     validate_config(c);
@@ -692,6 +694,113 @@ void codec_test() {
     expect(result["boxes"][0]["coordinate"][2] == 20, "local layout scaling");
     expect(decode_tensors({{"boxes", {0, 6}, {}}}, image(), c)["boxes"].empty(), "empty layout tensor");
 }
+void postprocess_test() {
+    auto make_box=[](std::string type,std::array<double,4> bounds,double score,size_t index) {
+        Box box; box.type=type; box.raw_type=type; box.bbox=bounds;
+        box.score=score; box.source_index=index; box.order=int(index);
+        box.reading_order=int(index); return box;
+    };
+    Image page{100,100,std::vector<uint8_t>(100*100*3,7)};
+    Json overlap={{"overlap",{{"enabled",true},{"iou_threshold",0.5},{"score_margin",0.3}}}};
+    auto table=make_box("table",{0,0,20,20},.65,0);
+    auto text=make_box("text",{1,1,19,19},.85,1);
+    auto merged=postprocess_boxes({table,text},overlap,page);
+    expect(merged.size()==1 && merged[0].type=="table","overlap priority within score margin");
+    text.score=.96;
+    merged=postprocess_boxes({table,text},overlap,page);
+    expect(merged.size()==1 && merged[0].type=="text","score gap above 0.3 should override label priority");
+    text.score=.95;
+    merged=postprocess_boxes({table,text},overlap,page);
+    expect(merged.size()==1 && merged[0].type=="text",
+           "score gap exactly 0.3 should override label priority");
+    Json settings={{"low_score",{{"enabled",true},{"threshold",0.3}}},
+        {"header_footer",{{"enabled",true}}},
+        {"overlap",{{"enabled",true}}},
+        {"composite",{{"enabled",true},{"retain_min_score",0.7}}}};
+    auto chart=make_box("chart",{10,10,70,70},.9,0);
+    auto inner=make_box("text",{20,20,30,30},.85,1);
+    auto header=make_box("header",{0,0,10,5},.95,2);
+    auto noise=make_box("text",{71,50,80,60},.2,3);
+    int redetections=0;
+    auto boxes=postprocess_boxes({chart,inner,header,noise},settings,page,
+        [&](const Image& whitened) {
+            ++redetections;
+            expect(whitened.rgb[(20*100+20)*3]==255 && whitened.rgb[(80*100+80)*3]==7,
+                   "composite whiteout must cover outer chart only");
+            return std::vector<Box>{make_box("text",{75,5,95,20},.8,0),
+                                    make_box("text",{20,20,30,30},.9,1),
+                                    make_box("header",{0,0,10,5},.9,2)};
+        });
+    expect(redetections==1 && boxes.size()==2 &&
+           boxes[0].type=="chart" && boxes[0].extensions["omniocr.composite_children"].size()==1 &&
+           boxes[1].extensions.value("omniocr.recovered",false),
+           "composite should retain confident chart and discover unmasked content once");
+    chart.score=.5;
+    boxes=postprocess_boxes({chart,inner},settings,page);
+    expect(boxes.size()==1 && boxes[0].type=="text" &&
+           boxes[0].extensions["omniocr.parent_source_index"]==0,
+           "low-confidence composite should expand its children");
+    chart.score=.95;
+    auto formula=make_box("formula",{25,25,29,29},.9,2);
+    boxes=postprocess_boxes({chart,inner,formula},settings,page);
+    expect(boxes.size()==2 && boxes[0].type=="text" && boxes[1].type=="formula",
+           "semantic descendant should expand chart through the containment hierarchy");
+    settings["composite"]["inspect_inner_text"]=true;
+    boxes=postprocess_boxes({chart,inner},settings,page);
+    expect(boxes.size()==2 && boxes[0].extensions.contains("omniocr.provisional_children"),
+           "content inspection must keep child OCR provisionally");
+    Page inspected; inspected.regions.resize(boxes.size());
+    for (size_t i=0;i<boxes.size();++i) inspected.regions[i].box=boxes[i];
+    inspected.regions[0].text="chart explanation";
+    inspected.regions[1].text="missing data";
+    finalize_composite_page(inspected,settings,{});
+    expect(inspected.regions.size()==1 && inspected.regions[0].box.type=="text" &&
+           inspected.regions[0].box.extensions["omniocr.parent_source_index"]==0,
+           "uncovered inner OCR should expand composite");
+    inspected.regions.resize(boxes.size());
+    for (size_t i=0;i<boxes.size();++i) inspected.regions[i].box=boxes[i];
+    inspected.regions[0].text="chart includes missing data";
+    inspected.regions[1].text="missing data";
+    finalize_composite_page(inspected,settings,{});
+    expect(inspected.regions.size()==1 && inspected.regions[0].box.type=="chart" &&
+           inspected.regions[0].box.extensions["omniocr.composite_children"].size()==1,
+           "covered inner OCR should retain composite");
+
+    const std::string header_row="<tr><th>A</th><th>B</th></tr>";
+    auto html=[&](const std::string& value) {
+        return "<table>\n"+header_row+"<tr><td>"+value+"</td><td>2</td></tr>\n</table>";
+    };
+    Document doc; doc.source="test";
+    for (int number=1;number<=3;++number) {
+        Page p; p.number=number;p.width=p.height=100;
+        Region r; r.box=make_box("table",{10,double(number==1 ? 80 : 1),90,
+                         double(number==3 ? 60 : 99)},.9,size_t(number));
+        r.text=html(std::to_string(number));p.regions.push_back(std::move(r));
+        doc.pages.push_back(std::move(p));
+    }
+    Json table_settings={{"cross_page_tables",{{"enabled",true},{"require_header_match",true}}}};
+    postprocess_document(doc,table_settings);
+    const auto& result=doc.pages[0].regions[0];
+    expect(result.text.find("<td>3</td>")!=std::string::npos &&
+           result.box.extensions["omniocr.merged_pages"].size()==2 &&
+           doc.pages[1].regions[0].text.empty() && doc.pages[2].regions[0].text.empty() &&
+           document_json(doc)["schema_version"]==2,
+           "three-page table continuation must merge into one block with provenance");
+    doc.pages[1].regions[0].text=html("other");
+    doc.pages[1].regions[0].box.extensions=Json::object();
+    doc.pages[1].regions[0].box.bbox={50,1,99,99};
+    doc.pages[0].regions[0].text=html("1");
+    doc.pages[0].regions[0].box.extensions=Json::object();
+    postprocess_document(doc,table_settings);
+    expect(doc.pages[1].regions[0].text==html("other"),"misaligned tables must remain separate");
+    auto c=config();c["postprocess"]=settings;
+    validate_config(c);
+    c["postprocess"]["overlap"]["score_margin"]=1.2;
+    throws([&]{validate_config(c);});
+    c["postprocess"]["overlap"]["score_margin"]=0.3;
+    c["postprocess"]["composite"]["max_recovered_boxes"]=0;
+    throws([&]{validate_config(c);});
+}
 void pipeline_test() {
     TempDir temp;
     auto png = image().png();
@@ -719,6 +828,74 @@ void pipeline_test() {
     c["models"]["shared"]["instances"] = 2;
     c["execution"]["workers"] = 1.5; throws([&] { validate_config(c); });
     c["execution"]["workers"] = 4294967297ULL; throws([&] { validate_config(c); });
+
+    auto filtered=config();
+    filtered["models"]["layout"]["response"]["boxes"] = Json::array({
+        {{"type","header"},{"bbox",{0,0,1,.1}},{"score",.95}},
+        {{"type","title"},{"bbox",{0,.1,1,.5}},{"score",.8}},
+        {{"type","text"},{"bbox",{0,.1,1,.5}},{"score",.6}},
+        {{"type","text"},{"bbox",{0,.5,1,1}},{"score",.1}}});
+    filtered["postprocess"]={{"low_score",{{"enabled",true},{"threshold",.3}}},
+        {"header_footer",{{"enabled",true}}},
+        {"overlap",{{"enabled",true},{"score_margin",.3}}}};
+    auto cleaned=Pipeline(filtered).run(temp.path/"input.png",temp.path/"filtered");
+    expect(cleaned.pages[0].regions.size()==1 && cleaned.pages[0].regions[0].box.type=="title",
+           "page postprocess must suppress header, low score and overlap before routing");
+}
+void composite_pipeline_test() {
+    TempDir temp;
+    Image page{100,100,std::vector<uint8_t>(100*100*3,7)};
+    auto png=page.png();
+    { std::ofstream out(temp.path/"input.png",std::ios::binary);
+      out.write(reinterpret_cast<const char*>(png.data()),std::streamsize(png.size())); }
+    auto c=config();
+    c["models"]["layout"]["response"]={{"boxes",Json::array()}};
+    c["routes"]["chart"]={{"model","shared"}};
+    c["postprocess"]={{"composite",{{"enabled",true}}}};
+    struct Fixture : Model {
+        bool layout;std::atomic<int>& passes;std::atomic<int>& recognition;
+        Fixture(bool l,std::atomic<int>& p,std::atomic<int>& r):layout(l),passes(p),recognition(r){}
+        Json infer(const Image& image,const std::string&) override {
+            if (!layout) {++recognition; return {{"text","recognized"}};}
+            ++passes;
+            if (image.rgb[(20*100+20)*3]==255)
+                return {{"boxes",Json::array({{{"type","text"},{"bbox",{.75,.1,.95,.2}}}})}};
+            return {{"boxes",Json::array({
+                {{"type","chart"},{"bbox",{.1,.1,.7,.7}},{"score",.95}},
+                {{"type","text"},{"bbox",{.2,.2,.3,.3}},{"score",.8}}
+            })}};
+        }
+    };
+    std::atomic<int> passes{0},recognition{0};
+    Pipeline pipeline(c,[&](const Json& settings,size_t) {
+        const bool layout=settings.at("response").contains("boxes");
+        return std::make_unique<Fixture>(layout,passes,recognition);
+    });
+    auto result=pipeline.run(temp.path/"input.png",temp.path/"output");
+    expect(passes==2 && recognition==2 && result.pages[0].regions.size()==2 &&
+           result.pages[0].regions[0].box.type=="chart" &&
+           result.pages[0].regions[1].box.extensions.value("omniocr.recovered",false),
+           "pipeline must run exactly one whiteout layout pass before OCR routing");
+    c["postprocess"]["composite"]["inspect_inner_text"]=true;
+    struct ContentFixture : Model {
+        bool layout;
+        explicit ContentFixture(bool l):layout(l){}
+        Json infer(const Image& crop,const std::string&) override {
+            if (!layout) return {{"text",crop.width>30 ? "chart summary" : "inner details"}};
+            if (crop.rgb[(20*100+20)*3]==255) return {{"boxes",Json::array()}};
+            return {{"boxes",Json::array({
+                {{"type","chart"},{"bbox",{.1,.1,.7,.7}},{"score",.95}},
+                {{"type","text"},{"bbox",{.2,.2,.3,.3}},{"score",.8}}
+            })}};
+        }
+    };
+    auto inspected=Pipeline(c,[&](const Json& settings,size_t) {
+        return std::make_unique<ContentFixture>(settings.at("response").contains("boxes"));
+    }).run(temp.path/"input.png",temp.path/"inspected");
+    expect(inspected.pages[0].regions.size()==1 &&
+           inspected.pages[0].regions[0].box.type=="text" &&
+           inspected.pages[0].regions[0].text=="inner details",
+           "pipeline must choose inner content after OCR when composite misses text");
 }
 void fallback_test() {
     TempDir temp;
@@ -918,7 +1095,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

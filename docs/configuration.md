@@ -30,6 +30,7 @@
 | `layout.image_size` | 不缩放 | MinerU 请求图像 `[宽,高]`，示例为 1036×1036 |
 | `layout.max_boxes` | 2000 | 单页 BOX 数上限 |
 | `layout.score_threshold` | 0 | 置信度过滤阈值 |
+| `postprocess` | 全部关闭 | 可选的 BOX 后处理与跨页表格合并，见下节 |
 
 服务专属的 `server` 配置可设置 `data_dir`、`allowed_input_root`、`host`、`port`、`api_key_env`、`max_upload_bytes`、`max_jobs`、`max_active_jobs`、`max_inflight_upload_bytes`、`max_queued_page_bytes`、`http_connections`、`connection_timeout_seconds`、`max_result_bytes` 和 `max_asset_bytes`。范围、启动样例和安全边界见[REST 服务](server.md#构建及启动)。批处理清单的 `options` 可覆盖 `execution` 中对应的调度设置；服务启动参数可覆盖配置文件。三种模式均复用模型池参数和 BOX 路由，无需改代码。未识别的 `execution`/`server` 键或越界值会在启动前报错。配置在进程启动时读取，修改工作线程数或模型实例数后须重启服务。
 
@@ -44,6 +45,36 @@
   "image": {"action": "image"}
 }
 ```
+
+## 可选 BOX 与跨页后处理
+
+v1 顶层和 v2 顶层都可设置 `postprocess`，所有开关默认为 `false`；布局解析完成后、BOX 识别前按顺序执行低分过滤、页眉页脚删除、复合框决策、重叠框消除。跨页表格在文档所有页面完成并恢复页序后处理，CLI、批处理和 REST 一致。
+
+```json
+"postprocess": {
+  "low_score": {"enabled": true, "threshold": 0.3},
+  "header_footer": {"enabled": true,
+    "types": ["header", "footer", "page_header", "page_footer", "ignored_header", "ignored_footer"]},
+  "overlap": {"enabled": true, "iou_threshold": 0.5, "score_margin": 0.3,
+    "label_priority": ["table", "chart", "figure", "title", "heading", "formula", "equation", "text", "header", "page_header", "footer", "page_footer"]},
+  "composite": {"enabled": true, "outer_types": ["chart", "figure", "table"],
+    "expand_inner_types": ["table", "formula", "equation", "title", "heading"],
+    "containment_threshold": 0.9, "retain_min_score": 0.7, "max_recovered_boxes": 100,
+    "inspect_inner_text": false, "expand_if_uncovered_text": true, "min_inner_text_chars": 4},
+  "cross_page_tables": {"enabled": true, "edge_margin_ratio": 0.1,
+    "x_overlap_threshold": 0.75, "require_header_match": false}
+}
+```
+
+`low_score` 在所有布局适配器返回后统一过滤；原有 `layout.score_threshold` 仍会在各内置适配器中更早过滤。`header_footer` 直接移除匹配类型的 BOX，不推理也不写入结果；与 route 的 `action: skip`（仍保留 BOX）不同。类型匹配发生在 `layout.type_map` 映射之后，请按部署模型的实际标签修改数组。
+
+`overlap` 只比较同页 bbox 的 IoU。IoU 达阈值时，分数差 **≥ 0.3** 优先选高分；差值较小时按 `label_priority` 数组从左到右选，最后以高分和原始索引打破平局。默认优先级是表格 > 图表 > 标题 > 公式 > 文本 > 页眉页脚；数组可独立调整。该策略不跨页去重，部分相交但 IoU 较低的不同内容会同时保留。
+
+`composite` 把包含比例达到阈值的 BOX 挂在**最小包围父框**下。置信度足够的图表/表格外框若只有普通文本子框则保留外框并抑制其所有后代；低分外框，或存在表格、公式、标题等语义后代时展开内部框。开启该功能且发现复合外框时，额外进行**一次**布局推理：将外框在原页上涂白，只吸收与涂白区域相交面积小于候选框 20% 的新增框，最多吸收 `max_recovered_boxes` 个。该补检寻找外框**周围**被遮蔽的遗漏内容，不会声称恢复涂白区域内的内容。模型可能在白块边缘产生误检，请结合低分过滤和重叠消除验证。启用后页面可能多一次布局推理，有额外延迟与算力开销。
+
+可选的 `inspect_inner_text: true` 让原本要保留的复合外框及其内部框都完成 OCR，然后再决定输出：如果外框识别为空、报错，或 `expand_if_uncovered_text: true` 且外框文本未覆盖长度达到 `min_inner_text_chars` 的内框文本，则展开内框；否则保留外框。比较时忽略空白并采用不区分大小写的字符串包含判断，并非语义相似度；默认不开启以避免增加内框推理负载。被抑制框的临时裁剪资源会删除，最终输出中只保留被选中的框。
+
+`cross_page_tables` 仅合并**相邻页**页尾与页首、水平位置对齐、同列数的简单 HTML `<table>`；默认要求表格分别位于距页边 10% 内、水平重合达到较宽表格宽度的 75%。重复表头行会移除；设 `require_header_match: true` 时只有两页表头相同才合并。合并结果放在首次出现的页，后续页表格 BOX 保留坐标与原始识别结果 `raw_text`，清空用于 Markdown 的 `text`，并通过 `extensions.omniocr.merged_into` 指向首个 BOX；首个 BOX 记录 `merged_pages`。含嵌套表格、`rowspan`/`colspan`、列数变化或非纯表格 HTML 的结果保持原样，避免猜测单元格关系。开启相应功能时，带扩展元数据的结果自动使用 JSON schema v2；显式指定 schema v1 会舍弃扩展元数据。
 
 ## 模型池
 

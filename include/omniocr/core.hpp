@@ -82,6 +82,10 @@ Json normalize_config(const Json&);
 Json load_config(const fs::path&);
 void validate_config(const Json&);
 std::vector<Box> parse_layout(const Json& response, const Json& layout, int width, int height);
+std::vector<Box> postprocess_boxes(std::vector<Box>, const Json& settings, const Image&,
+    const std::function<std::vector<Box>(const Image&)>& redetect = {});
+void finalize_composite_page(Page&, const Json& settings, const fs::path& output_dir);
+void postprocess_document(Document&, const Json& settings);
 std::string base64(const std::vector<uint8_t>&);
 Json post_json(const Json& settings, const Json& payload);
 

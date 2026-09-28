@@ -21,15 +21,19 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
     const auto& layout = config_.at("layout");
     const auto& routes = config_.at("routes");
     const bool record = execution.value("on_error", "fail") == "record";
-        Image small;
-        const Image* layout_image = &image;
-        if (layout.contains("image_size")) {
-            small = image.resize(layout.at("image_size").at(0), layout.at("image_size").at(1));
-            layout_image = &small;
-        }
-        auto response = models_->infer(layout.at("model"), *layout_image,
-            layout.value("prompt", layout.at("provider") == "mineru" ? "\nLayout Detection:" : ""));
-        auto boxes = parse_layout(response, layout, image.width, image.height);
+        auto detect = [&](const Image& original) {
+            Image small;
+            const Image* layout_image=&original;
+            if (layout.contains("image_size")) {
+                small=original.resize(layout.at("image_size").at(0),layout.at("image_size").at(1));
+                layout_image=&small;
+            }
+            auto response=models_->infer(layout.at("model"),*layout_image,
+                layout.value("prompt",layout.at("provider")=="mineru" ? "\nLayout Detection:" : ""));
+            return parse_layout(response,layout,original.width,original.height);
+        };
+        auto boxes=postprocess_boxes(detect(image),
+            config_.value("postprocess",Json::object()),image,detect);
         Page page; page.number = number; page.width = image.width; page.height = image.height;
         page.regions.resize(boxes.size());
         // Only worker_count crops exist simultaneously. BOX tasks rejoin the
@@ -116,6 +120,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             work();
             throw_if_cancelled();
             if (error) std::rethrow_exception(error);
+            finalize_composite_page(page,config_.value("postprocess",Json::object()),output_dir);
             return page;
         }
         if (submit) {
@@ -160,6 +165,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             done.wait(lock, [&] { return outstanding.load() == 0; });
             throw_if_cancelled();
             if (error) std::rethrow_exception(error);
+            finalize_composite_page(page,config_.value("postprocess",Json::object()),output_dir);
             return page;
         }
         std::vector<std::thread> threads;
@@ -169,6 +175,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         for (auto& t : threads) t.join();
         throw_if_cancelled();
         if (error) std::rethrow_exception(error);
+    finalize_composite_page(page,config_.value("postprocess",Json::object()),output_dir);
     return page;
 }
 Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
@@ -181,6 +188,7 @@ Document Pipeline::run(const fs::path& input, const fs::path& output_dir) {
         [&](int number, const Image& image) {
             doc.pages.push_back(process_page(number, image, output_dir, box_workers));
         });
+    postprocess_document(doc,config_.value("postprocess",Json::object()));
     return doc;
 }
 } // namespace omniocr

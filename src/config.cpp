@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 
@@ -218,6 +219,45 @@ void validate_config(const Json& c) {
         for (const auto& value:transform.at("matrix"))
             require(value.is_number() && std::isfinite(value.get<double>()),
                     "transform.matrix contains invalid value");
+    }
+    const auto post=c.value("postprocess",Json::object());
+    require(post.is_object(),"postprocess must be an object");
+    auto ratio=[&](const Json& section,const char* key,double low,double high) {
+        if (!section.contains(key)) return;
+        const auto& value=section.at(key);
+        require(value.is_number() && std::isfinite(value.get<double>()) &&
+                value.get<double>()>=low && value.get<double>()<=high,
+                std::string("postprocess.")+key+" out of range");
+    };
+    const std::map<std::string,std::set<std::string>> allowed={
+        {"low_score",{"enabled","threshold"}},
+        {"header_footer",{"enabled","types"}},
+        {"overlap",{"enabled","iou_threshold","score_margin","label_priority"}},
+        {"composite",{"enabled","outer_types","expand_inner_types","containment_threshold",
+                      "retain_min_score","max_recovered_boxes","inspect_inner_text",
+                      "expand_if_uncovered_text","min_inner_text_chars"}},
+        {"cross_page_tables",{"enabled","edge_margin_ratio","x_overlap_threshold","require_header_match"}}};
+    for (const auto& [name,section]:post.items()) {
+        require(allowed.count(name)>0 && section.is_object(),"unknown or invalid postprocess section: "+name);
+        for (const auto& [key,value]:section.items()) {
+            require(allowed.at(name).count(key)>0,"unknown postprocess setting: "+name+"."+key);
+            if (key=="enabled" || key=="require_header_match" || key=="inspect_inner_text" ||
+                key=="expand_if_uncovered_text")
+                require(value.is_boolean(),"postprocess "+key+" must be boolean");
+            if (key=="types" || key=="label_priority" || key=="outer_types" || key=="expand_inner_types") {
+                require(value.is_array(),"postprocess "+key+" must be an array");
+                std::set<std::string> seen;
+                for (const auto& item:value)
+                    require(item.is_string() && !item.get<std::string>().empty() &&
+                            seen.insert(item.get<std::string>()).second,
+                            "postprocess "+key+" requires unique nonempty strings");
+            }
+        }
+        for (const char* key:{"threshold","iou_threshold","score_margin","containment_threshold",
+                              "retain_min_score","x_overlap_threshold"}) ratio(section,key,0,1);
+        ratio(section,"edge_margin_ratio",0,0.5);
+        bounded(section,"max_recovered_boxes",1,1000);
+        bounded(section,"min_inner_text_chars",1,1000);
     }
     const auto& routes = c.at("routes");
     require(routes.is_object() && !routes.empty(), "routes must be a nonempty object");

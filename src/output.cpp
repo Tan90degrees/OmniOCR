@@ -7,7 +7,7 @@ namespace omniocr {
 Json document_json(const Document& doc, int requested_schema) {
     bool schema_v2 = false;
     for (const auto& page : doc.pages) for (const auto& region : page.regions)
-        if (!region.box.polygon.empty() || !region.box.reading_order ||
+        if (!region.box.polygon.empty() || !region.box.reading_order || !region.box.extensions.empty() ||
             region.box.provenance.value("adapter", std::string{}) == "paddle.doclayout_v3.http")
             schema_v2=true;
     if (requested_schema!=0 && requested_schema!=1 && requested_schema!=2)
