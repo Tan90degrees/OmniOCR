@@ -36,6 +36,12 @@
 
 vLLM 可按模型启用[自适应并发配置](configuration.md#离线任务自适应并发)。其 token 预算是客户端的近似在途需求，并非服务端 KV cache 的实时余量；吞吐窗口只统计当前模型 ID 的已完成请求。进行离线测量时，请对照固定并发 1/4/8/16/32 与自适应模式，在相同输入、服务端 `max_num_seqs`/`max_num_batched_tokens`、BOX/page/document workers 和模型参数下预热、交替重复运行。按 BOX 面积和估计输出长度分桶报告完成文档/BOX 吞吐、P50/P95/P99、HTTP 429/503、在途并发、排队等待、token 估计与真实 usage、NPU 利用率及 KV cache 占用。长尾小 BOX/大 BOX 混合负载尤其需要验证；本地模拟测试证明控制行为，不代表昇腾机器上的最优点。
 
+### 1652 文件现场结果与复测
+
+用户报告的原始配置为 `initial_concurrency=8, max_concurrency=32, min_concurrency=1, window_ms=2000, min_samples=8, cooldown_ms=3000`。18:53–20:45 完成 1652 个文件，1621 成功、31 失败，约 14.5 文件/分钟；目标并发在前 5 分钟达到 32 后保持不降。19:35–19:40 的采样显示窗口平均后端时延最高约 15 秒、瞬时完成吞吐最低约 0.94 请求/秒，同时没有 429/503。这些是用户现场采样；缺少逐 BOX 时序、文档难度、错误日志及设备利用率，不能据此断定 32 比 16 快，或判定 31 个失败为 kernel 崩溃。`pressure_total` 从 75 到 1156 是累计排队事件，并非队列长度；判断积压要记录 `models.<id>.queued` 的时间序列。
+
+新版控制器对连续两个有压力的窗口超过参考时延两倍的静默变慢也会减半并发，`latency_guard_ratio`、`latency_guard_windows` 可在模型配置中调整，`latency_backoff_total`、`latency_baseline_ms` 与 `latency_regression_streak` 可用于确认是否触发。BOX 大小变化会改变时延，故必须在同一数据集和相同后端参数下交替跑固定 8/16/24/32 与自适应各至少三轮，比较成功文件/分钟、BOX 请求/秒、P95/P99、队列等待、失败类型及 NPU/KV cache 状态。每 2 秒采样 `queued`、`inflight`、`concurrency_limit`、`window_throughput_per_second`、`window_mean_latency_ms`、`latency_backoff_total`；对失败收集 HTTP 状态、vLLM 服务日志及对应文件/BOX，区分输入异常、请求超时、模型响应异常和进程错误。如果只是工作负载由小 BOX 切换成大 BOX，延迟保护可能暂时降并发，需要按输入分桶复核后调整比率或设置 `latency_guard_ratio: 0`。该改动尚未经过现场 A/B 验证。
+
 ACL stream 默认开启，需回退时对该模型设置 `acl_async_stream: false`。“异步”指 Host 将拷贝与模型执行排入指定 stream；当前 `TensorEngine::run` 返回时仍需拿到输出，因此每次调用末尾同步。多个句柄可以在不同 stream 中重叠执行，单句柄的单个请求不会因改用 stream 自动实现流水线跨请求重叠。无设备的 CI 使用模拟 ACL SDK 检查调用顺序、锁页内存、并行 stream、错误回收和结果；用户已反馈异步流在实机可用，**吞吐、设备利用率与精度收益仍需保留对照数据**。
 
 真实 NPU 对照建议固定同一可用 OM、输入集和硬件，预热后交替运行 `acl_async_stream: false/true` 各至少三轮，保持 `instances`、`max_concurrent_requests`、`execution.box_workers`、批大小及服务负载一致。分别测单实例单页、多实例跨页和多实例跨文件，记录完成吞吐、P50/P95/P99、H2D/执行/D2H 阶段耗时、Host 锁页内存、设备内存、NPU 利用率、错误率及结果哈希；另测异常退出后的资源释放。现有 REST 基准的真实模式可收集端到端数据，细分设备阶段需在设备上结合 CANN profiling；不要把模拟 SDK 的并行断言当作性能倍率。
