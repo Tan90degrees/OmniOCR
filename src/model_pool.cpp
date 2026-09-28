@@ -43,23 +43,26 @@ struct ModelRegistry::Impl {
         bool batching = false;
         bool stopping = false;
         // All feedback and leases are protected by mutex. max_concurrent is a
-        // physical handle ceiling; target is the currently admitted limit.
+        // physical request ceiling; the adaptive window controls token budget.
         bool adaptive = false;
-        int minimum = 1, target = 1, window_ms = 1000, min_samples = 8, cooldown_ms = 2000;
-        int latency_target_ms = 0, latency_guard_windows = 2;
+        int minimum = 1, target = 1, window_ms = 5000, min_samples = 8, cooldown_ms = 3000;
         int pixels_per_token = 784, expected_output_tokens = 512;
-        double latency_guard_ratio = 2.0;
-        size_t token_budget = 32768, inflight_tokens = 0, inflight = 0;
-        double token_scale = 1.0, previous_throughput = 0, previous_latency_ms = 0;
-        double window_throughput = 0, window_latency_ms = 0;
-        double latency_baseline_ms = 0;
-        int latency_regression_streak = 0;
-        uint64_t latency_backoff_total = 0;
+        size_t token_budget = 32768, min_token_budget = 1, current_token_budget = 1;
+        size_t inflight_tokens = 0, inflight = 0, comparison_budget = 0;
+        double token_scale = 1.0, comparison_work_rate = 0;
+        double window_throughput = 0, window_latency_ms = 0, window_work_rate = 0, throughput_gain = 0;
+        double slow_start_gain = 0.10, probe_gain = 0.03, probe_step = 0.10, backoff_ratio = 0.85;
+        enum class Phase { SlowStart, Probe, Hold } phase = Phase::SlowStart;
+        bool evaluating_probe = false;
+        uint64_t control_epoch = 0, throughput_backoff_total = 0;
+        size_t stale_inflight = 0;
         uint64_t completed_total = 0, failed_total = 0, overload_total = 0;
+        uint64_t completed_normalized_work_total = 0;
         uint64_t pressure_total = 0, acquisition_timeout_total = 0;
         double queue_wait_ms_total = 0;
         uint64_t window_completed = 0, window_failed = 0, window_pressure = 0;
-        double window_latency_sum = 0;
+        uint64_t window_budget_pressure = 0, budget_pressure_total = 0;
+        double window_latency_sum = 0, window_work = 0;
         bool window_overload = false;
         std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point backoff_until{};
@@ -69,9 +72,15 @@ struct ModelRegistry::Impl {
                                  (pixels + uint64_t(pixels_per_token) - 1) / uint64_t(pixels_per_token);
             return size_t(std::max(1.0, std::ceil(double(raw) * token_scale)));
         }
+        size_t normalized_work(const Image& image, const std::string& prompt) const {
+            const uint64_t pixels = uint64_t(std::max(1, image.width)) * uint64_t(std::max(1, image.height));
+            return size_t(64 + (prompt.size() + 3) / 4 + uint64_t(expected_output_tokens) +
+                (pixels + uint64_t(pixels_per_token) - 1) / uint64_t(pixels_per_token));
+        }
         bool fits(size_t tokens) const {
             return inflight < size_t(target) &&
-                   (!inflight || (tokens <= token_budget && inflight_tokens <= token_budget - tokens));
+                   (!inflight || (tokens <= current_token_budget &&
+                                   inflight_tokens <= current_token_budget - tokens));
         }
         uint64_t next_admissible() const {
             if (scalar_queue.empty() || available.empty()) return std::numeric_limits<uint64_t>::max();
@@ -84,17 +93,40 @@ struct ModelRegistry::Impl {
                 if (fits(scalar_queue[i].tokens)) return scalar_queue[i].ticket;
             return std::numeric_limits<uint64_t>::max();
         }
-        void complete(bool failed, bool overloaded, double latency_ms, size_t estimate, size_t actual) {
+        void set_budget(size_t next) {
+            current_token_budget = std::clamp(next, min_token_budget, token_budget);
+            ++control_epoch;
+            stale_inflight = inflight;
+            window_start = std::chrono::steady_clock::now();
+            window_completed = window_failed = window_pressure = window_budget_pressure = 0;
+            window_work = window_latency_sum = 0;
+        }
+        size_t increased_budget(double factor) const {
+            return std::min(token_budget, std::max(current_token_budget + 1,
+                size_t(std::ceil(double(current_token_budget) * factor))));
+        }
+        void complete(bool failed, bool overloaded, double latency_ms, size_t estimate,
+                      size_t work, size_t actual, size_t output_tokens, uint64_t epoch) {
             std::lock_guard<std::mutex> guard(mutex);
+            if (!failed && output_tokens)
+                work = work - size_t(expected_output_tokens) + output_tokens;
+            const bool budget_blocked = !scalar_queue.empty() && inflight &&
+                (inflight_tokens > current_token_budget ||
+                 scalar_queue.front().tokens > current_token_budget - inflight_tokens);
             --inflight;
             inflight_tokens -= estimate;
             ++completed_total;
-            ++window_completed;
-            window_latency_sum += latency_ms;
-            // Requests already queued before this window still represent
-            // sustained demand; arrival-only pressure would stop ramping.
-            if (!scalar_queue.empty()) { ++window_pressure; ++pressure_total; }
-            if (failed) { ++failed_total; ++window_failed; }
+            if (!scalar_queue.empty()) ++pressure_total;
+            if (failed) ++failed_total;
+            else completed_normalized_work_total += work;
+            if (epoch != control_epoch && stale_inflight) {
+                --stale_inflight;
+                if (!stale_inflight) {
+                    window_start = std::chrono::steady_clock::now();
+                    window_completed = window_failed = window_pressure = window_budget_pressure = 0;
+                    window_work = window_latency_sum = 0;
+                }
+            }
             if (actual && !failed) {
                 const double ratio = std::clamp(double(actual) / double(estimate) * token_scale, 0.5, 4.0);
                 token_scale = 0.8 * token_scale + 0.2 * ratio;
@@ -102,56 +134,97 @@ struct ModelRegistry::Impl {
             if (overloaded) {
                 ++overload_total;
                 window_overload = true;
-                target = std::max(minimum, target / 2);
+                const auto smaller = std::max(min_token_budget,
+                    size_t(double(current_token_budget) * backoff_ratio));
+                if (smaller < current_token_budget) set_budget(smaller);
+                phase = Phase::Hold;
+                evaluating_probe = false;
                 backoff_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(cooldown_ms);
             }
+            // In-flight requests from an earlier budget do not enter the new
+            // budget's throughput sample; they still free their lease above.
+            if (epoch != control_epoch || stale_inflight) { ready.notify_all(); return; }
+            ++window_completed;
+            window_latency_sum += latency_ms;
+            if (failed) ++window_failed;
+            else window_work += double(work);
+            if (!scalar_queue.empty()) ++window_pressure;
+            if (budget_blocked) { ++window_budget_pressure; ++budget_pressure_total; }
             const auto now = std::chrono::steady_clock::now();
             const double elapsed = std::chrono::duration<double, std::milli>(now - window_start).count();
             if (elapsed >= window_ms && window_completed >= uint64_t(min_samples)) {
                 window_throughput = 1000.0 * double(window_completed - window_failed) / elapsed;
                 window_latency_ms = window_latency_sum / double(window_completed);
-                // Compare against a slowly drifting reference instead of only
-                // the immediately preceding (often noisy) two-second window.
-                // A sustained stall may not produce an HTTP 429/503 at all.
-                const bool latency_regressed = latency_guard_ratio > 0 && latency_baseline_ms > 0 &&
-                    window_latency_ms > latency_baseline_ms * latency_guard_ratio;
-                if (latency_regressed && window_pressure >= uint64_t(min_samples))
-                    ++latency_regression_streak;
-                else
-                    latency_regression_streak = 0;
-                if (latency_baseline_ms == 0)
-                    latency_baseline_ms = window_latency_ms;
-                else if (!latency_regressed)
-                    latency_baseline_ms = 0.98 * latency_baseline_ms + 0.02 * window_latency_ms;
-                if (!window_overload && window_pressure >= uint64_t(min_samples)) {
-                    if (latency_guard_ratio > 0 &&
-                        latency_regression_streak >= latency_guard_windows && now >= backoff_until) {
-                        target = std::max(minimum, target / 2);
-                        ++latency_backoff_total;
-                        latency_regression_streak = 0;
-                        backoff_until = now + std::chrono::milliseconds(cooldown_ms);
-                        // A permanently different BOX mix may remain slow at
-                        // minimum concurrency. Relearn its reference instead
-                        // of treating every later window as another stall.
-                        if (target == minimum) latency_baseline_ms = window_latency_ms;
-                    } else if (window_failed * 5 >= window_completed ||
-                        (latency_target_ms && window_latency_ms > latency_target_ms) ||
-                        (previous_throughput > 0 && window_throughput < previous_throughput * 0.9 &&
-                         window_latency_ms > previous_latency_ms * 1.2))
-                        target = std::max(minimum, target - 1);
-                    else if (now >= backoff_until && window_throughput >= previous_throughput * 0.9) {
-                        // Probe quickly while throughput improves; near a
-                        // plateau, use single-slot probes to limit overshoot.
-                        const bool ramp = previous_throughput == 0 ||
-                                          window_throughput > previous_throughput * 1.2;
-                        target = std::min(max_concurrent, ramp ? target * 2 : target + 1);
+                window_work_rate = 1000.0 * window_work / elapsed;
+                const bool demand = window_pressure >= uint64_t(min_samples) &&
+                                    window_budget_pressure >= uint64_t(min_samples);
+                size_t next = current_token_budget;
+                if (!window_overload && window_failed * 5 >= window_completed) {
+                    next = std::max(min_token_budget,
+                        size_t(double(current_token_budget) * backoff_ratio));
+                    phase = Phase::Hold;
+                    evaluating_probe = false;
+                    backoff_until = now + std::chrono::milliseconds(cooldown_ms);
+                } else if (!window_overload) {
+                    if (evaluating_probe && comparison_work_rate > 0) {
+                        throughput_gain = window_work_rate / comparison_work_rate - 1.0;
+                        if (current_token_budget < comparison_budget) {
+                            // At the hard ceiling, periodically test whether
+                            // less in-flight work completes just as quickly.
+                            if (throughput_gain < -probe_gain) {
+                                next = comparison_budget;
+                                phase = Phase::Hold;
+                            } else if (throughput_gain > probe_gain && demand)
+                                next = std::max(min_token_budget,
+                                    size_t(double(current_token_budget) * (1.0 - probe_step)));
+                            else phase = Phase::Hold;
+                            if (next >= comparison_budget || next == current_token_budget)
+                                backoff_until = now + std::chrono::milliseconds(cooldown_ms);
+                        } else if (phase == Phase::SlowStart && throughput_gain >= slow_start_gain && demand)
+                            next = increased_budget(2.0);
+                        else {
+                            if (phase == Phase::SlowStart) phase = Phase::Probe;
+                            if (throughput_gain >= probe_gain && demand)
+                                next = increased_budget(1.0 + probe_step);
+                            else if (throughput_gain < -probe_gain) {
+                                next = std::max(min_token_budget,
+                                    size_t(double(current_token_budget) * backoff_ratio));
+                                ++throughput_backoff_total;
+                                phase = Phase::Hold;
+                                backoff_until = now + std::chrono::milliseconds(cooldown_ms);
+                            } else {
+                                // A flat probe bought no useful throughput.
+                                next = std::max(min_token_budget, comparison_budget);
+                                phase = Phase::Hold;
+                                backoff_until = now + std::chrono::milliseconds(cooldown_ms);
+                            }
+                        }
+                    } else if (demand && now >= backoff_until && current_token_budget < token_budget) {
+                        next = increased_budget(phase == Phase::SlowStart ? 2.0 : 1.0 + probe_step);
+                        phase = phase == Phase::SlowStart ? Phase::SlowStart : Phase::Probe;
+                    } else if (window_pressure >= uint64_t(min_samples) && now >= backoff_until &&
+                               current_token_budget == token_budget && comparison_work_rate > 0) {
+                        next = std::max(min_token_budget,
+                            size_t(double(current_token_budget) * (1.0 - probe_step)));
+                        phase = Phase::Probe;
                     }
                 }
-                previous_throughput = window_throughput;
-                previous_latency_ms = window_latency_ms;
-                window_start = now;
-                window_completed = window_failed = window_pressure = 0;
-                window_latency_sum = 0;
+                const bool changed = next != current_token_budget;
+                if (changed) {
+                    comparison_work_rate = window_work_rate;
+                    comparison_budget = current_token_budget;
+                    set_budget(next);
+                } else {
+                    evaluating_probe = false;
+                    // No changed budget: learn the workload's current rate,
+                    // without backing off merely because BOX mix became slow.
+                    comparison_work_rate = window_work_rate;
+                    comparison_budget = current_token_budget;
+                    window_start = now;
+                    window_completed = window_failed = window_pressure = window_budget_pressure = 0;
+                    window_work = window_latency_sum = 0;
+                }
+                if (changed) evaluating_probe = phase != Phase::Hold;
                 window_overload = false;
             }
             ready.notify_all();
@@ -163,14 +236,21 @@ struct ModelRegistry::Impl {
                     {"max_concurrency", max_concurrent}, {"inflight", inflight},
                     {"inflight_estimated_tokens", inflight_tokens},
                     {"token_budget", adaptive ? token_budget : 0},
+                    {"current_token_budget", adaptive ? current_token_budget : 0},
+                    {"stale_inflight", adaptive ? stale_inflight : 0},
+                    {"min_token_budget", adaptive ? min_token_budget : 0},
+                    {"control_phase", phase == Phase::SlowStart ? "slow_start" :
+                                      phase == Phase::Probe ? "probe" : "hold"},
                     {"token_estimate_scale", token_scale},
                     {"queued", batching ? queue.size() : scalar_queue.size()},
                     {"window_throughput_per_second", window_throughput},
                     {"window_mean_latency_ms", window_latency_ms},
-                    {"latency_baseline_ms", latency_baseline_ms},
-                    {"latency_regression_streak", latency_regression_streak},
-                    {"latency_backoff_total", latency_backoff_total},
+                    {"window_normalized_work_per_second", window_work_rate},
+                    {"throughput_gain", throughput_gain},
+                    {"throughput_backoff_total", throughput_backoff_total},
+                    {"budget_pressure_total", budget_pressure_total},
                     {"completed_total", completed_total}, {"failed_total", failed_total},
+                    {"completed_normalized_work_total", completed_normalized_work_total},
                     {"overload_total", overload_total}, {"pressure_total", pressure_total},
                     {"acquisition_timeout_total", acquisition_timeout_total},
                     {"cooldown_remaining_ms", adaptive ? std::max<int64_t>(0,
@@ -260,19 +340,23 @@ struct ModelRegistry::Impl {
                 // Exclude the idle gap between offline jobs from the next
                 // throughput window.
                 window_start = std::chrono::steady_clock::now();
-                window_completed = window_failed = window_pressure = 0;
+                window_completed = window_failed = window_pressure = window_budget_pressure = 0;
                 window_latency_sum = 0;
                 window_overload = false;
-                previous_throughput = previous_latency_ms = 0;
-                latency_baseline_ms = 0;
-                latency_regression_streak = 0;
+                comparison_work_rate = 0;
+                evaluating_probe = false;
+                phase = Phase::SlowStart;
             }
             const auto ticket = next_ticket++;
             const size_t tokens = adaptive ? estimate_tokens(image, prompt) : 0;
+            const size_t work = adaptive ? normalized_work(image, prompt) : 0;
             const auto queued_at = std::chrono::steady_clock::now();
             scalar_queue.push_back({ticket, tokens});
+            const bool budget_blocked = adaptive && inflight &&
+                (inflight_tokens > current_token_budget || tokens > current_token_budget - inflight_tokens);
+            if (budget_blocked) { ++window_budget_pressure; ++budget_pressure_total; }
             if (adaptive && (inflight >= size_t(target) ||
-                (inflight && tokens > token_budget - std::min(token_budget, inflight_tokens)))) {
+                budget_blocked)) {
                 ++window_pressure;
                 ++pressure_total;
             }
@@ -299,6 +383,7 @@ struct ModelRegistry::Impl {
             size_t index = available.front(); available.pop_front();
             ++inflight;
             if (adaptive) inflight_tokens += tokens;
+            const auto epoch = control_epoch;
             lock.unlock();
             ready.notify_all();
             // Returning a lease is exception safe. No instance is used concurrently.
@@ -320,16 +405,18 @@ struct ModelRegistry::Impl {
             const auto start = std::chrono::steady_clock::now();
             bool failed = false, overloaded = false;
             struct Feedback {
-                Pool& pool; size_t tokens, index;
+                Pool& pool; size_t tokens, work, index;
+                uint64_t epoch;
                 bool& failed; bool& overloaded;
                 std::chrono::steady_clock::time_point start;
                 ~Feedback() {
                     const double ms = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - start).count();
-                    pool.complete(failed, overloaded, ms, tokens,
-                                  failed ? 0 : pool.models[index]->last_usage_tokens());
+                    pool.complete(failed, overloaded, ms, tokens, work,
+                                  failed ? 0 : pool.models[index]->last_usage_tokens(),
+                                  failed ? 0 : pool.models[index]->last_completion_tokens(), epoch);
                 }
-            } feedback{*this, tokens, index, failed, overloaded, start};
+            } feedback{*this, tokens, work, index, epoch, failed, overloaded, start};
             try {
                 throw_if_cancelled();
                 auto response = models[index]->infer(image, prompt);
@@ -371,21 +458,33 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
                     throw std::runtime_error("adaptive_concurrency requires vllm backend: " + id);
                 pool->minimum = adaptive.value("min_concurrency", 1);
                 pool->target = adaptive.value("initial_concurrency", std::min(4, pool->max_concurrent));
-                pool->window_ms = adaptive.value("window_ms", 1000);
+                if (pool->minimum < 1 || pool->target < pool->minimum || pool->target > pool->max_concurrent)
+                    throw std::runtime_error("invalid adaptive_concurrency settings for " + id);
+                pool->window_ms = adaptive.value("window_ms", 5000);
                 pool->min_samples = adaptive.value("min_samples", 8);
-                pool->cooldown_ms = adaptive.value("cooldown_ms", 2000);
-                pool->latency_target_ms = adaptive.value("latency_target_ms", 0);
-                pool->latency_guard_ratio = adaptive.value("latency_guard_ratio", 2.0);
-                pool->latency_guard_windows = adaptive.value("latency_guard_windows", 2);
+                pool->cooldown_ms = adaptive.value("cooldown_ms", 3000);
                 pool->pixels_per_token = adaptive.value("image_pixels_per_token", 784);
                 pool->expected_output_tokens = adaptive.value("expected_output_tokens", 512);
                 pool->token_budget = adaptive.value("token_budget", 32768);
+                pool->min_token_budget = adaptive.value("min_token_budget",
+                    std::max<size_t>(1, pool->token_budget * size_t(pool->minimum) / size_t(pool->max_concurrent)));
+                pool->current_token_budget = adaptive.value("initial_token_budget",
+                    std::max(pool->min_token_budget,
+                        pool->token_budget * size_t(pool->target) / size_t(pool->max_concurrent)));
+                pool->slow_start_gain = adaptive.value("slow_start_gain", 0.10);
+                pool->probe_gain = adaptive.value("probe_gain", 0.03);
+                pool->probe_step = adaptive.value("probe_step", 0.10);
+                pool->backoff_ratio = adaptive.value("backoff_ratio", 0.85);
+                pool->target = pool->max_concurrent;
                 if (pool->minimum < 1 || pool->target < pool->minimum || pool->target > pool->max_concurrent ||
                     pool->window_ms < 100 || pool->min_samples < 1 || pool->pixels_per_token < 1 ||
-                    pool->expected_output_tokens < 1 || pool->token_budget < 1 || pool->latency_target_ms < 0 ||
-                    pool->cooldown_ms < 0 || !std::isfinite(pool->latency_guard_ratio) ||
-                    (pool->latency_guard_ratio != 0 && pool->latency_guard_ratio < 1.1) ||
-                    pool->latency_guard_windows < 1)
+                    pool->expected_output_tokens < 1 || pool->token_budget < 1 ||
+                    pool->min_token_budget < 1 || pool->min_token_budget > pool->current_token_budget ||
+                    pool->current_token_budget > pool->token_budget || pool->cooldown_ms < 0 ||
+                    !std::isfinite(pool->slow_start_gain) || !std::isfinite(pool->probe_gain) ||
+                    !std::isfinite(pool->probe_step) || !std::isfinite(pool->backoff_ratio) ||
+                    pool->slow_start_gain <= 0 || pool->probe_gain <= 0 ||
+                    pool->probe_step <= 0 || pool->backoff_ratio <= 0 || pool->backoff_ratio >= 1)
                     throw std::runtime_error("invalid adaptive_concurrency settings for " + id);
             }
         }

@@ -20,7 +20,7 @@
 | 跨页 BOX 公平调度 | 一个繁忙页面的工作循环长期占用 BOX 工作线程 | 每个任务处理一个 BOX 后回到全局队列尾部；每页同时提交不超过 `box_workers` 个任务，其他页面得以轮流执行 |
 | 实例级组批配置 | 同一模型的所有并发槽位共享一组批大小和等待窗口 | `instance_overrides` 按槽位设置批大小与窗口，所有实例仍从该模型的全局 BOX 队列领取任务 |
 | ACL stream 推理（默认开启） | 每个输入同步 H2D、同步执行 OM、每个输出同步 D2H | 每个模型句柄独立 stream，复用锁页 Host 缓冲；按序提交 H2D、异步模型执行和 D2H，一次同步后读取结果 |
-| vLLM 自适应并发（可选） | 固定模型并发槽位，需要人工调优 | BOX 直接并发提交，按在途 token 估计、区间吞吐与时延调节并发；429/503 快速退避，不干预 vLLM 连续批处理 |
+| vLLM 自适应并发（可选） | 固定模型并发槽位，需要人工调优 | BOX 直接并发提交，按在途 token 预算与完成工作量吞吐调节准入；429/503 退避，不干预 vLLM 连续批处理 |
 
 模型实例池保证同一个 HTTP 客户端不被多个线程同时使用；实例可在线程间转移。每次请求完成或异常后清理请求选项，保留连接缓存；不同实例不共享认证头。HTTP 服务主动关闭连接时会按需新建连接。外部插件继续控制自己的传输实现，公共 `post_json()` 保留一次性调用语义，不自动获得实例级缓存。
 
@@ -40,7 +40,7 @@ vLLM 可按模型启用[自适应并发配置](configuration.md#离线任务自�
 
 用户报告的原始配置为 `initial_concurrency=8, max_concurrency=32, min_concurrency=1, window_ms=2000, min_samples=8, cooldown_ms=3000`。18:53–20:45 完成 1652 个文件，1621 成功、31 失败，约 14.5 文件/分钟；目标并发在前 5 分钟达到 32 后保持不降。19:35–19:40 的采样显示窗口平均后端时延最高约 15 秒、瞬时完成吞吐最低约 0.94 请求/秒，同时没有 429/503。这些是用户现场采样；缺少逐 BOX 时序、文档难度、错误日志及设备利用率，不能据此断定 32 比 16 快，或判定 31 个失败为 kernel 崩溃。`pressure_total` 从 75 到 1156 是累计排队事件，并非队列长度；判断积压要记录 `models.<id>.queued` 的时间序列。
 
-新版控制器对连续两个有压力的窗口超过参考时延两倍的静默变慢也会减半并发，`latency_guard_ratio`、`latency_guard_windows` 可在模型配置中调整，`latency_backoff_total`、`latency_baseline_ms` 与 `latency_regression_streak` 可用于确认是否触发。BOX 大小变化会改变时延，故必须在同一数据集和相同后端参数下交替跑固定 8/16/24/32 与自适应各至少三轮，比较成功文件/分钟、BOX 请求/秒、P95/P99、队列等待、失败类型及 NPU/KV cache 状态。每 2 秒采样 `queued`、`inflight`、`concurrency_limit`、`window_throughput_per_second`、`window_mean_latency_ms`、`latency_backoff_total`；对失败收集 HTTP 状态、vLLM 服务日志及对应文件/BOX，区分输入异常、请求超时、模型响应异常和进程错误。如果只是工作负载由小 BOX 切换成大 BOX，延迟保护可能暂时降并发，需要按输入分桶复核后调整比率或设置 `latency_guard_ratio: 0`。该改动尚未经过现场 A/B 验证。
+后续修正把优化目标改为**估算完成工作量/秒**，在途 token 预算为主要控制变量，请求数是硬上限。上探没有有效吞吐收益时返回前一预算；只有探测后的吞吐明显下降、高失败率或显式 429/503 才退避，不能用平均时延上升单独判定拥塞。应在同一数据集和相同后端参数下交替跑固定 8/16/24/32 与自适应各至少三轮，比较成功文件/分钟、BOX 请求/秒、估算工作量/秒、P95/P99、队列等待、失败类型及 NPU/KV cache 状态。每 5 秒采样 `queued`、`inflight`、`current_token_budget`、`window_normalized_work_per_second`、`throughput_gain`、`throughput_backoff_total`，另采 vLLM 的 Running/Waiting 与队列延迟；对失败收集 HTTP 状态、服务日志及对应文件/BOX，区分输入异常、请求超时、模型响应异常和进程错误。该修正尚未经过现场 A/B 验证。
 
 ACL stream 默认开启，需回退时对该模型设置 `acl_async_stream: false`。“异步”指 Host 将拷贝与模型执行排入指定 stream；当前 `TensorEngine::run` 返回时仍需拿到输出，因此每次调用末尾同步。多个句柄可以在不同 stream 中重叠执行，单句柄的单个请求不会因改用 stream 自动实现流水线跨请求重叠。无设备的 CI 使用模拟 ACL SDK 检查调用顺序、锁页内存、并行 stream、错误回收和结果；用户已反馈异步流在实机可用，**吞吐、设备利用率与精度收益仍需保留对照数据**。
 

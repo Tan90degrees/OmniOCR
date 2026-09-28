@@ -80,7 +80,7 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
 
 ### 离线任务自适应并发
 
-可在单个 vLLM 模型（v2 为 `executors.<id>`）上设置 `adaptive_concurrency.enabled: true`。这条路径始终保持 `batch_size: 1`：每个 BOX 独立向 vLLM 发请求，vLLM 自己连续批处理不同图片/尺寸的请求。框架不按 BOX 数量等待凑批，也不把 BOX 张数当成 token 数。`max_concurrent_requests` 是预创建 HTTP 客户端及并发的硬上限；`execution.box_workers`（单文件 CLI 为 `execution.workers`）及页面供给量也必须足够大，控制器才能看到持续的队列需求。
+单个 vLLM 模型（v2 为 `executors.<id>`）设置 `adaptive_concurrency.enabled: true` 后，每个 BOX 独立发送请求，vLLM 保持自身的连续批处理。控制器以完成的估算工作量/秒爬山：先增大在途 token 预算，吞吐增益接近平台时按小步探测，探测造成吞吐下降时温和回退。请求数由 `max_concurrent_requests` 硬限制，适配不同大小 BOX 的主控制量为 `current_token_budget`。页面/BOX worker 必须足够多且有持续排队需求，否则无法判断提升预算是否有收益。
 
 ```json
 "ocr": {
@@ -88,18 +88,26 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
   "model": "served-vlm", "instances": 1, "max_concurrent_requests": 32,
   "batch_size": 1, "max_pending_requests": 256,
   "adaptive_concurrency": {
-    "enabled": true, "min_concurrency": 1, "initial_concurrency": 4,
-    "window_ms": 1000, "min_samples": 8, "cooldown_ms": 2000,
-    "latency_target_ms": 0, "latency_guard_ratio": 2.0,
-    "latency_guard_windows": 2, "token_budget": 32768,
+    "enabled": true, "min_concurrency": 1, "initial_concurrency": 8,
+    "window_ms": 5000, "min_samples": 8, "cooldown_ms": 3000,
+    "token_budget": 32768, "min_token_budget": 1024,
+    "initial_token_budget": 8192,
+    "slow_start_gain": 0.10, "probe_gain": 0.03,
+    "probe_step": 0.10, "backoff_ratio": 0.85,
     "image_pixels_per_token": 784, "expected_output_tokens": 512
   }
 }
 ```
 
-除 `enabled` 外字段均可省略，取上例的默认值（`initial_concurrency` 默认不超过硬上限）；`latency_target_ms: 0` 表示不设置绝对时延目标。控制器还会对持续的静默变慢退避：至少两个有排队压力的完成窗口，其平均后端时延超过慢速更新的参考值 2 倍时，把目标并发减半并进入冷却期；`latency_guard_ratio: 0` 可以关闭这一保护。不同大小 BOX 的耗时本来就不同，真实负载应按面积、输出 token 和后端 KV cache 状态对照该比率与绝对时延目标，不能把降并发视为单次 kernel 异常的诊断。每次租赁检查并发上限和在途 token 预算；单个估计超过预算的请求允许独占运行。队首大 BOX 暂时放不进预算时，小 BOX 最多越队四次，随后等待大 BOX 独占，避免大小混合负载的队首阻塞和大 BOX 饥饿。估计值按图片宽高、prompt 长度、固定开销及预期输出 token 计算，并用 vLLM 返回的 `usage.total_tokens` 缓慢校正；图片到视觉 token 的换算依赖模型的 resize/patch 规则，`image_pixels_per_token` 是**容量估计参数**，并非精确 token 计数。服务若不返回 usage，仍按静态估计运行。多个模型 ID 各自有控制器；若它们指向同一远端服务，token 预算不会跨 ID 共享。
+`token_budget` 是在途估算 token 的硬上限，`min_token_budget <= initial_token_budget <= token_budget`；单个 BOX 的估计超过当前预算时允许独占运行，不能据此把预算视为严格的设备显存上限。不填写初始/最小预算时，分别按 `token_budget × initial_concurrency / max_concurrent_requests` 和 `token_budget × min_concurrency / max_concurrent_requests` 推导；后两个旧字段仅用于默认预算计算。`max_concurrent_requests` 同时决定预创建的 HTTP 客户端个数。`window_ms` 默认 5000 ms，建议在真实后端上使用 5–10 秒以上且有足够完成样本的窗口。
 
-每个至少 `window_ms` 且有 `min_samples` 次完成的区间，控制器比较完成吞吐、平均后端时延与上一区间：在持续排队且吞吐明显改善时加倍并发上限，接近平台时每次试探增加一个槽位；时延超目标、错误比例较高或吞吐明显下降且时延上升时减少一个。持续时延退化按上述比率减半；HTTP 429/503 立即减半；冷却期间暂停升并发，不自动重试失败请求。客户端仍受 `acquire_timeout_ms` 与 `max_pending_requests` 保护。`GET /v1/metrics` 的 `models.<id>` 展示并发上限、在途数、估计 token、队列长度、累计排队时长/超时次数、最近区间吞吐/平均后端时延、参考时延、连续退化窗口、时延退避次数和错误计数。`pressure_total` 是累计排队事件数，也在队列未空时按完成次数累加；分析积压须看 `queued` 的时间序列及其斜率。固定并发仍为默认策略；自适应仅支持 vLLM，不能与原生组批或 `instance_overrides` 同时启用。无压测数据时无法保证任意模型都达到最大吞吐，建议从较宽的安全硬上限和设备可承受的 token 预算开始，再依据实际吞吐、P95/P99 与显存修改配置。
+每个完成窗口统计 `normalized_work = 64 + prompt字节数/4 + 输出 token + 图片像素数/image_pixels_per_token`，目标为 `sum(normalized_work)/窗口秒数`。输出 token 优先使用 vLLM 的 `usage.completion_tokens`，若响应未提供则使用 `expected_output_tokens`。这个量是**工作代理指标**，不是真实视觉 token、NPU FLOPs 或准确率：vLLM 的缩放/patch 规则和缓存命中会改变真实计算量。`usage.total_tokens` 仅校准**准入预算估计**，不回写已完成工作量，避免动态校准让工作量单位漂移。必须按面积与输出长度分桶对比真实负载。
+
+持续需求且预算有阻塞时，慢启动只有增益超过 `slow_start_gain` 才继续翻倍；随后按 `probe_step` 小步探测，增益低于 `probe_gain` 时回到探测前预算并暂缓再探。上探吞吐下降超过 `probe_gain` 时按 `backoff_ratio` 温和退避；到达预算硬上限后也可向下探测。HTTP 429/503 立即按该比率退避，高失败率也退避，不自动重试。时延只作为诊断指标，不会因自身升高而降预算。旧版 `latency_target_ms`、`latency_guard_ratio`、`latency_guard_windows` 配置仍被接受以兼容配置文件，但不参与新的控制决策；建议删除。
+
+`GET /v1/metrics` 的 `models.<id>` 含 `current_token_budget`、`token_budget`、`control_phase`、`window_normalized_work_per_second`、`completed_normalized_work_total`、`throughput_gain`、`throughput_backoff_total`、请求吞吐、平均后端时延、队列深度及排队累计事件。`pressure_total` 会在入队发现阻塞或完成时队列未空累加，**不是当前积压长度**。队首大 BOX 暂时放不进预算时，小 BOX 最多越队四次。多个模型 ID 各自有独立控制器；如果它们共享同一 vLLM endpoint，预算不会跨 ID 合并。vLLM 的 Running/Waiting/KV cache 指标可另行采集对照，当前客户端不抓取远端 Prometheus 指标参与控制，以避免监控端点不可用阻塞推理。
+
+固定并发仍为默认策略；自适应仅用于 vLLM，不能与原生组批或 `instance_overrides` 同时启用。工作量代理和控制参数是否达到实机最高吞吐，必须以固定预算/并发扫描和交替 A/B 测试验证。
 
 `parameters` 可指定 `temperature`、`top_p`、`max_tokens` 及目标 vLLM 支持的扩展采样字段。框架固定 `stream=false`，总是发送 PNG data URL；模型名和 messages 不允许被 parameters 覆盖。`finish_reason=length` 按截断错误处理。
 

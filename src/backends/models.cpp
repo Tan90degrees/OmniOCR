@@ -9,6 +9,7 @@ class HttpModel final : public Model {
     HttpClient client_;
     std::unique_ptr<HttpClient> batch_client_;
     size_t last_tokens_ = 0;
+    size_t last_completion_tokens_ = 0;
 public:
     explicit HttpModel(Json config) : config_(std::move(config)), client_(config_) {
         if (config_.contains("batch_endpoint")) {
@@ -19,6 +20,7 @@ public:
     }
     bool supports_batch() const override { return config_.at("backend") == "http_json" && !!batch_client_; }
     size_t last_usage_tokens() const override { return last_tokens_; }
+    size_t last_completion_tokens() const override { return last_completion_tokens_; }
     std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
         if (!supports_batch() || inputs.empty())
             throw std::runtime_error("HTTP backend has no native batch endpoint");
@@ -36,6 +38,7 @@ public:
     }
     Json infer(const Image& image, const std::string& prompt) override {
         last_tokens_ = 0;
+        last_completion_tokens_ = 0;
         const auto data = "data:image/png;base64," + base64(image.png());
         if (config_.at("backend") == "http_json")
             return client_.post({{"image", data}, {"prompt", prompt}, {"width", image.width}, {"height", image.height}});
@@ -57,6 +60,11 @@ public:
             else if (usage.contains("total_tokens") && usage.at("total_tokens").is_number_integer() &&
                      usage.at("total_tokens").get<int64_t>() > 0)
                 last_tokens_ = size_t(usage.at("total_tokens").get<int64_t>());
+            if (usage.contains("completion_tokens") && usage.at("completion_tokens").is_number_unsigned())
+                last_completion_tokens_ = usage.at("completion_tokens").get<size_t>();
+            else if (usage.contains("completion_tokens") && usage.at("completion_tokens").is_number_integer() &&
+                     usage.at("completion_tokens").get<int64_t>() > 0)
+                last_completion_tokens_ = size_t(usage.at("completion_tokens").get<int64_t>());
         }
         const auto& choice = response.at("choices").at(0);
         if (choice.value("finish_reason", std::string{}) == "length") throw std::runtime_error("vLLM output truncated; raise max_tokens");
