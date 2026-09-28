@@ -41,7 +41,7 @@ int priority(const Box& b, const std::vector<std::string>& list) {
     return it==list.end() ? 0 : int(list.size()-(it-list.begin()));
 }
 bool wins(const Box& a, const Box& b, double margin, const std::vector<std::string>& list) {
-    if (std::abs(a.score-b.score)>=margin && a.score!=b.score) return a.score>b.score;
+    if (std::abs(a.score-b.score)+1e-9>=margin && a.score!=b.score) return a.score>b.score;
     if (priority(a,list)!=priority(b,list)) return priority(a,list)>priority(b,list);
     if (a.score!=b.score) return a.score>b.score;
     return a.source_index<b.source_index;

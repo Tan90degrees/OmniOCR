@@ -709,6 +709,10 @@ void postprocess_test() {
     text.score=.96;
     merged=postprocess_boxes({table,text},overlap,page);
     expect(merged.size()==1 && merged[0].type=="text","score gap above 0.3 should override label priority");
+    text.score=.95;
+    merged=postprocess_boxes({table,text},overlap,page);
+    expect(merged.size()==1 && merged[0].type=="text",
+           "score gap exactly 0.3 should override label priority");
     Json settings={{"low_score",{{"enabled",true},{"threshold",0.3}}},
         {"header_footer",{{"enabled",true}}},
         {"overlap",{{"enabled",true}}},
