@@ -39,7 +39,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 time.sleep(.07)
                 body = json.dumps({'choices': [{'finish_reason': 'stop',
-                    'message': {'content': prompt}}], 'usage': {'total_tokens': 300}}).encode()
+                    'message': {'content': prompt}}],
+                    'usage': {'total_tokens': 300, 'completion_tokens': 42}}).encode()
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -85,8 +86,7 @@ def run(binary):
                         'max_concurrent_requests': 4, 'model': 'fixture',
                         'endpoint': f'http://127.0.0.1:{backend.server_port}/v1/chat/completions',
                         'adaptive_concurrency': {'enabled': True, 'initial_concurrency': 1,
-                            'window_ms': 100, 'min_samples': 2, 'token_budget': 10000,
-                            'latency_target_ms': 1000}}},
+                            'window_ms': 100, 'min_samples': 2, 'token_budget': 10000}}},
                 'routes': {label: {'model': 'ocr', 'prompt': label} for label in labels},
                 'server': {'port': port, 'data_dir': str(root / 'state'),
                            'allowed_input_root': str(root), 'max_jobs': 1}}
@@ -108,6 +108,8 @@ def run(binary):
                     model = stats['models']['ocr']
                     assert model['strategy'] == 'adaptive' and 2 <= model['concurrency_limit'] <= 4, model
                     assert model['completed_total'] == 20 and model['inflight'] == 0, model
+                    assert 20 * 42 < model['completed_normalized_work_total'] < 20 * 512, model
+                    assert 0 < model['current_token_budget'] <= model['token_budget'], model
                     assert 0.5 <= model['token_estimate_scale'] < 1.0, model
                     assert sorted(backend.calls) == sorted(labels) and backend.widths == {40, 80, 120, 160}
                     assert 2 <= backend.peak <= 4

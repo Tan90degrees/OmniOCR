@@ -59,6 +59,7 @@ public:
     virtual std::vector<Json> infer_batch(const std::vector<BatchInput>&);
     // Optional usage for feedback calibration. The pool never requires it.
     virtual size_t last_usage_tokens() const { return 0; }
+    virtual size_t last_completion_tokens() const { return 0; }
 };
 using ModelFactory = std::function<std::unique_ptr<Model>(const Json&, size_t)>;
 std::unique_ptr<Model> make_model(const Json&, size_t instance);

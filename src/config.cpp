@@ -103,6 +103,8 @@ void validate_config(const Json& c) {
             const std::set<std::string> fields = {"enabled", "min_concurrency", "initial_concurrency",
                 "window_ms", "min_samples", "cooldown_ms", "latency_target_ms",
                 "latency_guard_ratio", "latency_guard_windows", "token_budget",
+                "min_token_budget", "initial_token_budget", "slow_start_gain",
+                "probe_gain", "probe_step", "backoff_ratio",
                 "image_pixels_per_token", "expected_output_tokens"};
             for (const auto& [key, value] : adaptive.items())
                 require(fields.count(key) != 0, "unknown adaptive_concurrency setting: " + key);
@@ -122,6 +124,15 @@ void validate_config(const Json& c) {
                         "latency_guard_ratio must be 0 or between 1.1 and 100");
             }
             bounded(adaptive, "token_budget", 1, 1000000000);
+            bounded(adaptive, "min_token_budget", 1, 1000000000);
+            bounded(adaptive, "initial_token_budget", 1, 1000000000);
+            for (const char* key : {"slow_start_gain", "probe_gain", "probe_step", "backoff_ratio"}) {
+                if (!adaptive.contains(key)) continue;
+                const auto& value = adaptive.at(key);
+                require(value.is_number() && std::isfinite(value.get<double>()) &&
+                        value.get<double>() > 0 && value.get<double>() < 1,
+                        std::string(key) + " must be between 0 and 1");
+            }
             bounded(adaptive, "image_pixels_per_token", 1, 1000000);
             bounded(adaptive, "expected_output_tokens", 1, 1000000);
             if (adaptive.value("enabled", false)) {
@@ -133,6 +144,13 @@ void validate_config(const Json& c) {
                 const int initial = adaptive.value("initial_concurrency", std::min(4, ceiling));
                 require(minimum <= initial && initial <= ceiling,
                         "adaptive_concurrency requires min <= initial <= max_concurrent_requests");
+                const int budget = adaptive.value("token_budget", 32768);
+                const int floor = adaptive.value("min_token_budget", int(std::max<int64_t>(1,
+                    int64_t(budget) * minimum / ceiling)));
+                const int starting = adaptive.value("initial_token_budget", int(std::max<int64_t>(floor,
+                    int64_t(budget) * initial / ceiling)));
+                require(floor <= starting && starting <= budget,
+                        "adaptive_concurrency requires min_token_budget <= initial_token_budget <= token_budget");
             }
         }
         if (backend == "vllm" || backend == "http_json") {

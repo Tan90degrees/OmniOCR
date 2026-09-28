@@ -307,6 +307,7 @@ void adaptive_concurrency_test() {
     scheduling["initial_concurrency"] = 2;
     scheduling["expected_output_tokens"] = 1;
     scheduling["token_budget"] = 150;
+    scheduling["initial_token_budget"] = 150;
     std::promise<void> first_started, release_first, small_started;
     auto release_gate = release_first.get_future().share();
     struct SizeProbe : Model {
@@ -339,29 +340,22 @@ void adaptive_concurrency_test() {
     release_first.set_value();
     expect(bypassed && small.get()["text"] == "small" && first.get()["text"] == "first" &&
            large.get()["text"] == "large", "small BOX could not bypass token-blocked large BOX");
+    expect(mixed.scheduler_metrics()["shared"]["completed_normalized_work_total"] == 363,
+           "normalized work should count BOX area without mutable token calibration");
     settings["models"]["shared"]["adaptive_concurrency"]["token_budget"] = 10000;
+    scheduling.erase("initial_token_budget");
     settings["models"]["shared"]["adaptive_concurrency"]["initial_concurrency"] = 3;
     struct Overload : Model {
         Json infer(const Image&, const std::string&) override { throw HttpStatusError(429); }
     };
     ModelRegistry overloaded(settings.at("models"), [](const Json&, size_t) { return std::make_unique<Overload>(); });
     throws([&] { overloaded.infer("shared", image(), ""); });
-    expect(overloaded.scheduler_metrics()["shared"]["concurrency_limit"] == 1 &&
+    expect(overloaded.scheduler_metrics()["shared"]["current_token_budget"] < 10000 &&
            overloaded.scheduler_metrics()["shared"]["overload_total"] == 1 &&
            overloaded.scheduler_metrics()["shared"]["cooldown_remaining_ms"] > 0,
-           "HTTP overload should halve the admission limit");
-    settings["models"]["shared"]["adaptive_concurrency"]["latency_target_ms"] = 10;
-    State latency_state;
-    ModelRegistry latency(settings.at("models"), [&](const Json&, size_t) { return std::make_unique<Slow>(latency_state); });
-    burst(latency, 20);
-    expect(latency.scheduler_metrics()["shared"]["concurrency_limit"] < 3 &&
-           latency.scheduler_metrics()["shared"]["window_mean_latency_ms"] > 10,
-           "high backend latency should lower the concurrency target");
-    scheduling["latency_target_ms"] = 0;
+           "HTTP overload should reduce the adaptive token budget");
     settings["models"]["shared"]["max_concurrent_requests"] = 4;
     scheduling["initial_concurrency"] = 4;
-    scheduling["latency_guard_ratio"] = 1.5;
-    scheduling["latency_guard_windows"] = 2;
     scheduling["cooldown_ms"] = 200;
     struct SilentStall : Model {
         std::atomic<int>& calls;
@@ -377,22 +371,66 @@ void adaptive_concurrency_test() {
         return std::make_unique<SilentStall>(calls);
     });
     burst(stall, 80);
-    expect(stall.scheduler_metrics()["shared"]["latency_backoff_total"] >= 1 &&
-           stall.scheduler_metrics()["shared"]["overload_total"] == 0,
-           "sustained silent backend latency regression did not trigger backoff");
-    scheduling["latency_guard_ratio"] = 0;
+    expect(stall.scheduler_metrics()["shared"]["window_mean_latency_ms"] >= 100 &&
+           stall.scheduler_metrics()["shared"]["overload_total"] == 0 &&
+           stall.scheduler_metrics()["shared"]["current_token_budget"] > 5000,
+           "backend slowdown should not trigger a latency-only half backoff");
+    scheduling["expected_output_tokens"] = 1;
+    scheduling["token_budget"] = 2000;
+    scheduling["min_token_budget"] = 70;
+    scheduling["initial_token_budget"] = 70;
+    settings["models"]["shared"]["max_concurrent_requests"] = 8;
+    scheduling["initial_concurrency"] = 1;
+    struct GrowingLatency : Model {
+        std::atomic<int>& active;
+        explicit GrowingLatency(std::atomic<int>& a) : active(a) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            const int concurrent = ++active;
+            std::this_thread::sleep_for(std::chrono::milliseconds(35 + concurrent * 3));
+            --active;
+            return {{"text", prompt}};
+        }
+    };
+    std::atomic<int> growing_active{0};
+    ModelRegistry increasing(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<GrowingLatency>(growing_active);
+    });
+    burst(increasing, 80);
+    expect(increasing.scheduler_metrics()["shared"]["current_token_budget"] > 70 &&
+           increasing.scheduler_metrics()["shared"]["window_normalized_work_per_second"] > 0,
+           "throughput controller failed to grow despite higher latency and useful work gain");
+    scheduling["initial_token_budget"] = 350;
+    scheduling["min_token_budget"] = 100;
+    struct Congested : Model {
+        std::atomic<int>& active;
+        explicit Congested(std::atomic<int>& a) : active(a) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            const int concurrent = ++active;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5 + concurrent * concurrent * 4));
+            --active;
+            return {{"text", prompt}};
+        }
+    };
+    std::atomic<int> congested_active{0};
+    ModelRegistry congestion(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<Congested>(congested_active);
+    });
+    burst(congestion, 80);
+    expect(congestion.scheduler_metrics()["shared"]["budget_pressure_total"] > 0 &&
+           congestion.scheduler_metrics()["shared"]["current_token_budget"] < 2000,
+           "controller kept expanding token budget after normalized throughput saturated");
     validate_config(settings);
     auto bad = settings;
-    bad["models"]["shared"]["adaptive_concurrency"]["latency_guard_ratio"] = 1.0;
+    bad["models"]["shared"]["adaptive_concurrency"]["backoff_ratio"] = 1.0;
     throws([&] { validate_config(bad); });
     bad = settings;
-    bad["models"]["shared"]["adaptive_concurrency"]["latency_guard_windows"] = 0;
+    bad["models"]["shared"]["adaptive_concurrency"]["initial_token_budget"] = 20000;
     throws([&] { validate_config(bad); });
     bad = settings;
     bad["models"]["shared"]["adaptive_concurrency"]["token_budget"] = 0;
     throws([&] { validate_config(bad); });
     bad = settings;
-    bad["models"]["shared"]["adaptive_concurrency"]["initial_concurrency"] = 5;
+    bad["models"]["shared"]["adaptive_concurrency"]["initial_concurrency"] = 9;
     throws([&] { validate_config(bad); });
     bad = settings;
     bad["models"]["shared"]["batch_size"] = 2;
