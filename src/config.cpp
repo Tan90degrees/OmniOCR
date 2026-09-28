@@ -105,12 +105,17 @@ void validate_config(const Json& c) {
                 "window_ms", "min_samples", "cooldown_ms", "latency_target_ms",
                 "latency_guard_ratio", "latency_guard_windows", "token_budget",
                 "min_token_budget", "initial_token_budget", "slow_start_gain",
-                "probe_gain", "probe_step", "backoff_ratio",
+                "probe_gain", "probe_step", "backoff_ratio", "feedback_mode", "recovery_factor",
                 "image_pixels_per_token", "expected_output_tokens"};
             for (const auto& [key, value] : adaptive.items())
                 require(fields.count(key) != 0, "unknown adaptive_concurrency setting: " + key);
             if (adaptive.contains("enabled"))
                 require(adaptive.at("enabled").is_boolean(), "adaptive_concurrency.enabled must be boolean");
+            if (adaptive.contains("feedback_mode"))
+                require(adaptive.at("feedback_mode").is_string() &&
+                    (adaptive.at("feedback_mode") == "throughput" ||
+                     adaptive.at("feedback_mode") == "overload_only"),
+                    "adaptive_concurrency.feedback_mode must be throughput or overload_only");
             bounded(adaptive, "min_concurrency", 1, 128);
             bounded(adaptive, "initial_concurrency", 1, 128);
             bounded(adaptive, "window_ms", 100, 60000);
@@ -134,6 +139,12 @@ void validate_config(const Json& c) {
                         value.get<double>() > 0 && value.get<double>() < 1,
                         std::string(key) + " must be between 0 and 1");
             }
+            if (adaptive.contains("recovery_factor")) {
+                const auto& value = adaptive.at("recovery_factor");
+                require(value.is_number() && std::isfinite(value.get<double>()) &&
+                    value.get<double>() > 1 && value.get<double>() <= 4,
+                    "adaptive_concurrency.recovery_factor must be in (1,4]");
+            }
             bounded(adaptive, "image_pixels_per_token", 1, 1000000);
             bounded(adaptive, "expected_output_tokens", 1, 1000000);
             if (adaptive.value("enabled", false)) {
@@ -148,8 +159,9 @@ void validate_config(const Json& c) {
                 const int budget = adaptive.value("token_budget", 32768);
                 const int floor = adaptive.value("min_token_budget", int(std::max<int64_t>(1,
                     int64_t(budget) * minimum / ceiling)));
-                const int starting = adaptive.value("initial_token_budget", int(std::max<int64_t>(floor,
-                    int64_t(budget) * initial / ceiling)));
+                const int starting = adaptive.value("initial_token_budget",
+                    adaptive.value("feedback_mode",std::string("throughput")) == "overload_only" ?
+                    budget : int(std::max<int64_t>(floor,int64_t(budget) * initial / ceiling)));
                 require(floor <= starting && starting <= budget,
                         "adaptive_concurrency requires min_token_budget <= initial_token_budget <= token_budget");
             }

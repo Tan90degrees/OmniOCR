@@ -441,6 +441,53 @@ void adaptive_concurrency_test() {
     bad["models"]["shared"]["backend"] = "mock";
     throws([&] { validate_config(bad); });
 }
+void overload_only_test() {
+    auto settings=config();
+    settings["models"]["shared"]={{"backend","vllm"},
+        {"endpoint","http://127.0.0.1:1/v1/chat/completions"},
+        {"model","fixture"},{"instances",1},{"max_concurrent_requests",4},
+        {"acquire_timeout_ms",5000},{"adaptive_concurrency",{
+            {"enabled",true},{"feedback_mode","overload_only"},{"token_budget",1000},
+            {"min_token_budget",100},{"expected_output_tokens",100},
+            {"window_ms",100},{"min_samples",2},{"cooldown_ms",0},
+            {"backoff_ratio",0.5},{"recovery_factor",2.0}}}};
+    validate_config(settings);
+    struct Backend : Model {
+        std::atomic<int>& calls;
+        explicit Backend(std::atomic<int>& n):calls(n){}
+        Json infer(const Image&, const std::string&) override {
+            const int index=calls.fetch_add(1);
+            if (index==0) throw HttpStatusError(429);
+            std::this_thread::sleep_for(std::chrono::milliseconds(index%7==0 ? 180 : 70));
+            return {{"text","ok"}};
+        }
+    };
+    std::atomic<int> calls{0};
+    ModelRegistry pool(settings.at("models"),[&](const Json&,size_t) {
+        return std::make_unique<Backend>(calls);
+    });
+    expect(pool.scheduler_metrics()["shared"]["current_token_budget"]==1000,
+           "overload-only should start at full token budget");
+    throws([&]{pool.infer("shared",image(),"");});
+    expect(pool.scheduler_metrics()["shared"]["current_token_budget"]==500,
+           "429 must reduce the overload-only budget");
+    std::vector<std::future<Json>> jobs;
+    for (int i=0;i<32;++i) jobs.push_back(std::async(std::launch::async,[&] {
+        auto sample=image();return pool.infer("shared",sample,"");
+    }));
+    for (auto& job:jobs) expect(job.get()["text"]=="ok","overload recovery dropped a BOX");
+    const auto metrics=pool.scheduler_metrics()["shared"];
+    expect(metrics["feedback_mode"]=="overload_only" &&
+           metrics["current_token_budget"]==1000 && metrics["overload_total"]==1 &&
+           metrics["throughput_backoff_total"]==0,
+           "overload-only should recover to the ceiling without throughput backoff");
+    auto bad=settings;
+    bad["models"]["shared"]["adaptive_concurrency"]["feedback_mode"]="latency";
+    throws([&]{validate_config(bad);});
+    bad=settings;
+    bad["models"]["shared"]["adaptive_concurrency"]["recovery_factor"]=1.0;
+    throws([&]{validate_config(bad);});
+}
 void dynamic_batch_test() {
     struct State { std::mutex mutex; std::vector<std::vector<std::string>> groups; } state;
     struct Batched : Model {
@@ -1095,7 +1142,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); cancellation_pool_test(); adaptive_concurrency_test(); overload_only_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

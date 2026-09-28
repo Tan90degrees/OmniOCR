@@ -45,6 +45,7 @@ struct ModelRegistry::Impl {
         // All feedback and leases are protected by mutex. max_concurrent is a
         // physical request ceiling; the adaptive window controls token budget.
         bool adaptive = false;
+        bool overload_only = false;
         int minimum = 1, target = 1, window_ms = 5000, min_samples = 8, cooldown_ms = 3000;
         int pixels_per_token = 784, expected_output_tokens = 512;
         size_t token_budget = 32768, min_token_budget = 1, current_token_budget = 1;
@@ -52,6 +53,7 @@ struct ModelRegistry::Impl {
         double token_scale = 1.0, comparison_work_rate = 0;
         double window_throughput = 0, window_latency_ms = 0, window_work_rate = 0, throughput_gain = 0;
         double slow_start_gain = 0.10, probe_gain = 0.03, probe_step = 0.10, backoff_ratio = 0.85;
+        double recovery_factor = 2.0;
         enum class Phase { SlowStart, Probe, Hold } phase = Phase::SlowStart;
         bool evaluating_probe = false;
         uint64_t control_epoch = 0, throughput_backoff_total = 0;
@@ -159,7 +161,14 @@ struct ModelRegistry::Impl {
                 const bool demand = window_pressure >= uint64_t(min_samples) &&
                                     window_budget_pressure >= uint64_t(min_samples);
                 size_t next = current_token_budget;
-                if (!window_overload && window_failed * 5 >= window_completed) {
+                if (overload_only) {
+                    // A slow backend without a 429/503 is not evidence that
+                    // admitting fewer BOXes will improve offline throughput.
+                    if (demand && now >= backoff_until && !window_overload)
+                        next = increased_budget(recovery_factor);
+                    phase = next == token_budget ? Phase::Hold : Phase::Probe;
+                    evaluating_probe = false;
+                } else if (!window_overload && window_failed * 5 >= window_completed) {
                     next = std::max(min_token_budget,
                         size_t(double(current_token_budget) * backoff_ratio));
                     phase = Phase::Hold;
@@ -224,7 +233,7 @@ struct ModelRegistry::Impl {
                     window_completed = window_failed = window_pressure = window_budget_pressure = 0;
                     window_work = window_latency_sum = 0;
                 }
-                if (changed) evaluating_probe = phase != Phase::Hold;
+                if (changed && !overload_only) evaluating_probe = phase != Phase::Hold;
                 window_overload = false;
             }
             ready.notify_all();
@@ -232,6 +241,7 @@ struct ModelRegistry::Impl {
         Json metrics() {
             std::lock_guard<std::mutex> guard(mutex);
             return {{"strategy", adaptive ? "adaptive" : "fixed"},
+                    {"feedback_mode", adaptive ? (overload_only ? "overload_only" : "throughput") : "none"},
                     {"concurrency_limit", adaptive ? target : max_concurrent},
                     {"max_concurrency", max_concurrent}, {"inflight", inflight},
                     {"inflight_estimated_tokens", inflight_tokens},
@@ -466,15 +476,18 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
                 pool->pixels_per_token = adaptive.value("image_pixels_per_token", 784);
                 pool->expected_output_tokens = adaptive.value("expected_output_tokens", 512);
                 pool->token_budget = adaptive.value("token_budget", 32768);
+                pool->overload_only = adaptive.value("feedback_mode",std::string("throughput")) == "overload_only";
                 pool->min_token_budget = adaptive.value("min_token_budget",
                     std::max<size_t>(1, pool->token_budget * size_t(pool->minimum) / size_t(pool->max_concurrent)));
                 pool->current_token_budget = adaptive.value("initial_token_budget",
-                    std::max(pool->min_token_budget,
-                        pool->token_budget * size_t(pool->target) / size_t(pool->max_concurrent)));
+                    pool->overload_only ? pool->token_budget :
+                        std::max(pool->min_token_budget,
+                            pool->token_budget * size_t(pool->target) / size_t(pool->max_concurrent)));
                 pool->slow_start_gain = adaptive.value("slow_start_gain", 0.10);
                 pool->probe_gain = adaptive.value("probe_gain", 0.03);
                 pool->probe_step = adaptive.value("probe_step", 0.10);
                 pool->backoff_ratio = adaptive.value("backoff_ratio", 0.85);
+                pool->recovery_factor = adaptive.value("recovery_factor", 2.0);
                 pool->target = pool->max_concurrent;
                 if (pool->minimum < 1 || pool->target < pool->minimum || pool->target > pool->max_concurrent ||
                     pool->window_ms < 100 || pool->min_samples < 1 || pool->pixels_per_token < 1 ||
@@ -483,6 +496,8 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
                     pool->current_token_budget > pool->token_budget || pool->cooldown_ms < 0 ||
                     !std::isfinite(pool->slow_start_gain) || !std::isfinite(pool->probe_gain) ||
                     !std::isfinite(pool->probe_step) || !std::isfinite(pool->backoff_ratio) ||
+                    !std::isfinite(pool->recovery_factor) || pool->recovery_factor <= 1.0 ||
+                    pool->recovery_factor > 4.0 ||
                     pool->slow_start_gain <= 0 || pool->probe_gain <= 0 ||
                     pool->probe_step <= 0 || pool->backoff_ratio <= 0 || pool->backoff_ratio >= 1)
                     throw std::runtime_error("invalid adaptive_concurrency settings for " + id);
