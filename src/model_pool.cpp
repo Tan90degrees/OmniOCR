@@ -46,10 +46,15 @@ struct ModelRegistry::Impl {
         // physical handle ceiling; target is the currently admitted limit.
         bool adaptive = false;
         int minimum = 1, target = 1, window_ms = 1000, min_samples = 8, cooldown_ms = 2000;
-        int latency_target_ms = 0, pixels_per_token = 784, expected_output_tokens = 512;
+        int latency_target_ms = 0, latency_guard_windows = 2;
+        int pixels_per_token = 784, expected_output_tokens = 512;
+        double latency_guard_ratio = 2.0;
         size_t token_budget = 32768, inflight_tokens = 0, inflight = 0;
         double token_scale = 1.0, previous_throughput = 0, previous_latency_ms = 0;
         double window_throughput = 0, window_latency_ms = 0;
+        double latency_baseline_ms = 0;
+        int latency_regression_streak = 0;
+        uint64_t latency_backoff_total = 0;
         uint64_t completed_total = 0, failed_total = 0, overload_total = 0;
         uint64_t pressure_total = 0, acquisition_timeout_total = 0;
         double queue_wait_ms_total = 0;
@@ -105,8 +110,31 @@ struct ModelRegistry::Impl {
             if (elapsed >= window_ms && window_completed >= uint64_t(min_samples)) {
                 window_throughput = 1000.0 * double(window_completed - window_failed) / elapsed;
                 window_latency_ms = window_latency_sum / double(window_completed);
+                // Compare against a slowly drifting reference instead of only
+                // the immediately preceding (often noisy) two-second window.
+                // A sustained stall may not produce an HTTP 429/503 at all.
+                const bool latency_regressed = latency_guard_ratio > 0 && latency_baseline_ms > 0 &&
+                    window_latency_ms > latency_baseline_ms * latency_guard_ratio;
+                if (latency_regressed && window_pressure >= uint64_t(min_samples))
+                    ++latency_regression_streak;
+                else
+                    latency_regression_streak = 0;
+                if (latency_baseline_ms == 0)
+                    latency_baseline_ms = window_latency_ms;
+                else if (!latency_regressed)
+                    latency_baseline_ms = 0.98 * latency_baseline_ms + 0.02 * window_latency_ms;
                 if (!window_overload && window_pressure >= uint64_t(min_samples)) {
-                    if (window_failed * 5 >= window_completed ||
+                    if (latency_guard_ratio > 0 &&
+                        latency_regression_streak >= latency_guard_windows && now >= backoff_until) {
+                        target = std::max(minimum, target / 2);
+                        ++latency_backoff_total;
+                        latency_regression_streak = 0;
+                        backoff_until = now + std::chrono::milliseconds(cooldown_ms);
+                        // A permanently different BOX mix may remain slow at
+                        // minimum concurrency. Relearn its reference instead
+                        // of treating every later window as another stall.
+                        if (target == minimum) latency_baseline_ms = window_latency_ms;
+                    } else if (window_failed * 5 >= window_completed ||
                         (latency_target_ms && window_latency_ms > latency_target_ms) ||
                         (previous_throughput > 0 && window_throughput < previous_throughput * 0.9 &&
                          window_latency_ms > previous_latency_ms * 1.2))
@@ -139,6 +167,9 @@ struct ModelRegistry::Impl {
                     {"queued", batching ? queue.size() : scalar_queue.size()},
                     {"window_throughput_per_second", window_throughput},
                     {"window_mean_latency_ms", window_latency_ms},
+                    {"latency_baseline_ms", latency_baseline_ms},
+                    {"latency_regression_streak", latency_regression_streak},
+                    {"latency_backoff_total", latency_backoff_total},
                     {"completed_total", completed_total}, {"failed_total", failed_total},
                     {"overload_total", overload_total}, {"pressure_total", pressure_total},
                     {"acquisition_timeout_total", acquisition_timeout_total},
@@ -233,6 +264,8 @@ struct ModelRegistry::Impl {
                 window_latency_sum = 0;
                 window_overload = false;
                 previous_throughput = previous_latency_ms = 0;
+                latency_baseline_ms = 0;
+                latency_regression_streak = 0;
             }
             const auto ticket = next_ticket++;
             const size_t tokens = adaptive ? estimate_tokens(image, prompt) : 0;
@@ -342,13 +375,17 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
                 pool->min_samples = adaptive.value("min_samples", 8);
                 pool->cooldown_ms = adaptive.value("cooldown_ms", 2000);
                 pool->latency_target_ms = adaptive.value("latency_target_ms", 0);
+                pool->latency_guard_ratio = adaptive.value("latency_guard_ratio", 2.0);
+                pool->latency_guard_windows = adaptive.value("latency_guard_windows", 2);
                 pool->pixels_per_token = adaptive.value("image_pixels_per_token", 784);
                 pool->expected_output_tokens = adaptive.value("expected_output_tokens", 512);
                 pool->token_budget = adaptive.value("token_budget", 32768);
                 if (pool->minimum < 1 || pool->target < pool->minimum || pool->target > pool->max_concurrent ||
                     pool->window_ms < 100 || pool->min_samples < 1 || pool->pixels_per_token < 1 ||
                     pool->expected_output_tokens < 1 || pool->token_budget < 1 || pool->latency_target_ms < 0 ||
-                    pool->cooldown_ms < 0)
+                    pool->cooldown_ms < 0 || !std::isfinite(pool->latency_guard_ratio) ||
+                    (pool->latency_guard_ratio != 0 && pool->latency_guard_ratio < 1.1) ||
+                    pool->latency_guard_windows < 1)
                     throw std::runtime_error("invalid adaptive_concurrency settings for " + id);
             }
         }

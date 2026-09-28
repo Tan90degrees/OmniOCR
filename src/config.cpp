@@ -101,7 +101,8 @@ void validate_config(const Json& c) {
             const auto& adaptive = m.at("adaptive_concurrency");
             require(adaptive.is_object(), "adaptive_concurrency must be an object");
             const std::set<std::string> fields = {"enabled", "min_concurrency", "initial_concurrency",
-                "window_ms", "min_samples", "cooldown_ms", "latency_target_ms", "token_budget",
+                "window_ms", "min_samples", "cooldown_ms", "latency_target_ms",
+                "latency_guard_ratio", "latency_guard_windows", "token_budget",
                 "image_pixels_per_token", "expected_output_tokens"};
             for (const auto& [key, value] : adaptive.items())
                 require(fields.count(key) != 0, "unknown adaptive_concurrency setting: " + key);
@@ -113,6 +114,13 @@ void validate_config(const Json& c) {
             bounded(adaptive, "min_samples", 1, 10000);
             bounded(adaptive, "cooldown_ms", 0, 60000);
             bounded(adaptive, "latency_target_ms", 0, 3600000);
+            bounded(adaptive, "latency_guard_windows", 1, 100);
+            if (adaptive.contains("latency_guard_ratio")) {
+                const auto& ratio = adaptive.at("latency_guard_ratio");
+                require(ratio.is_number() && std::isfinite(ratio.get<double>()) &&
+                        (ratio.get<double>() == 0 || (ratio.get<double>() >= 1.1 && ratio.get<double>() <= 100)),
+                        "latency_guard_ratio must be 0 or between 1.1 and 100");
+            }
             bounded(adaptive, "token_budget", 1, 1000000000);
             bounded(adaptive, "image_pixels_per_token", 1, 1000000);
             bounded(adaptive, "expected_output_tokens", 1, 1000000);

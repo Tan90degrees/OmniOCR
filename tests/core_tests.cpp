@@ -357,7 +357,38 @@ void adaptive_concurrency_test() {
     expect(latency.scheduler_metrics()["shared"]["concurrency_limit"] < 3 &&
            latency.scheduler_metrics()["shared"]["window_mean_latency_ms"] > 10,
            "high backend latency should lower the concurrency target");
+    scheduling["latency_target_ms"] = 0;
+    settings["models"]["shared"]["max_concurrent_requests"] = 4;
+    scheduling["initial_concurrency"] = 4;
+    scheduling["latency_guard_ratio"] = 1.5;
+    scheduling["latency_guard_windows"] = 2;
+    scheduling["cooldown_ms"] = 200;
+    struct SilentStall : Model {
+        std::atomic<int>& calls;
+        explicit SilentStall(std::atomic<int>& c) : calls(c) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            const int index = calls.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(index < 16 ? 15 : 160));
+            return {{"text", prompt}};
+        }
+    };
+    std::atomic<int> calls{0};
+    ModelRegistry stall(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<SilentStall>(calls);
+    });
+    burst(stall, 80);
+    expect(stall.scheduler_metrics()["shared"]["latency_backoff_total"] >= 1 &&
+           stall.scheduler_metrics()["shared"]["overload_total"] == 0,
+           "sustained silent backend latency regression did not trigger backoff");
+    scheduling["latency_guard_ratio"] = 0;
+    validate_config(settings);
     auto bad = settings;
+    bad["models"]["shared"]["adaptive_concurrency"]["latency_guard_ratio"] = 1.0;
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["adaptive_concurrency"]["latency_guard_windows"] = 0;
+    throws([&] { validate_config(bad); });
+    bad = settings;
     bad["models"]["shared"]["adaptive_concurrency"]["token_budget"] = 0;
     throws([&] { validate_config(bad); });
     bad = settings;
