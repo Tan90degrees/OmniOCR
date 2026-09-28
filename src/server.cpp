@@ -166,6 +166,7 @@ class ServerScheduler {
     };
     Pipeline pipeline_;
     Json document_settings_;
+    Json postprocess_settings_;
     int schema_version_ = 0;
     Options options_;
     BoxTaskPool box_pool_;
@@ -267,8 +268,9 @@ class ServerScheduler {
         job->pages.clear();
         return true;
     }
-    void finalize(const std::shared_ptr<Job>& job, const Document& doc) {
+    void finalize(const std::shared_ptr<Job>& job, Document doc) {
         try {
+            postprocess_document(doc,postprocess_settings_);
             write_outputs(doc, job->output, "both", schema_version_);
             std::lock_guard<std::mutex> guard(mutex_);
             job->finalizer_running = false;
@@ -360,7 +362,7 @@ class ServerScheduler {
                     ready = finalize_locked(job, done);
                     finish_cancel_locked(job);
                 }
-                if (ready) finalize(job, done);
+                if (ready) finalize(job, std::move(done));
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 job->reader_running = false;
@@ -424,7 +426,7 @@ class ServerScheduler {
                     }
                     finish_cancel_locked(work.job);
                 }
-                if (ready) finalize(work.job, done);
+                if (ready) finalize(work.job, std::move(done));
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> guard(mutex_);
                 if (counted) --work.job->pages_running;
@@ -441,6 +443,7 @@ class ServerScheduler {
 public:
     explicit ServerScheduler(Json config, Options options)
         : pipeline_(config), document_settings_(config.value("document", Json::object())),
+          postprocess_settings_(config.value("postprocess",Json::object())),
           schema_version_(config.value("output",Json::object()).value("schema_version",0)),
           options_(std::move(options)),
           box_pool_(options_.box_workers > 1 ? options_.box_workers : 0) {

@@ -175,6 +175,7 @@ std::vector<BatchResult> Pipeline::run_batch(const std::vector<BatchJob>& jobs,
         if (!results[i].error.empty()) continue;
         for (auto& [number, page] : finished[i])
             results[i].document.pages.push_back(std::move(page));
+        postprocess_document(results[i].document,config_.value("postprocess",Json::object()));
     }
     return results;
 }

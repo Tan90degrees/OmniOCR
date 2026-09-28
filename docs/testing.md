@@ -8,7 +8,7 @@
 
 | 入口 | 覆盖内容 | 条件与边界 |
 |---|---|---|
-| `ctest` | 核心逻辑、共享实例池、并发组批/尾批/排队超时、ACL stream 调用顺序/锁页缓冲/并行句柄/异常回收、HTTP 连接复用、fallback、输出解码 | ACL 测试使用仓库内的模拟 SDK，无 NPU 吞吐或精度结论；HTTP 测试使用本地模拟服务 |
+| `ctest` | 核心逻辑、共享实例池、并发组批/尾批/排队超时、布局框过滤/优先级/复合框涂白补检、三页 HTML 表格合并、ACL stream 调用顺序/锁页缓冲/并行句柄/异常回收、HTTP 连接复用、fallback、输出解码 | 后处理使用构造框与模拟识别，须用真实版面标注和跨页表格验证误合并/误删；ACL 测试使用模拟 SDK |
 | [document_integration.py](../tests/document_integration.py) | 六种 Office 格式、12 页 PDF、页序和转换失败 | 真实 LibreOffice/Poppler，Mock 模型 |
 | [input_formats_integration.py](../tests/input_formats_integration.py) | RTF、ODF、HTML、CSV、TIFF、EPUB/OFD、限制与混合批次 | `--external` 要求真实 Calibre/OFD；Mock 模型 |
 | [onnx_integration.py](../tests/onnx_integration.py) | ONNX Runtime、额外并发句柄、动态 batch、固定 batch 尾批填充、CTC 与形状拒绝 | 实际执行生成的小图，不评估 OCR 精度 |
@@ -70,6 +70,7 @@ done
 
 - 每个声明支持的文件格式与模型部署组合，在实际环境中执行并保留结果。
 - 按正文、布局、阅读顺序、表格、公式分别评价准确率。
+- 对可选后处理逐项做开/关 A/B：页眉页脚与低分框的漏检率，IoU/0.3 分数边界的冲突正确率，复合框补检引入的误检及额外布局耗时，以及 `inspect_inner_text` 带来的额外 OCR 开销、内外框取舍与信息遗漏率；跨页表格统计单元格结构与误合并率。包含三页以上连续表格、同列但不同表、重复表头、跨列/跨行单元格、图表内文字与公式。
 - 多实例、跨 BOX 共享、同卡/多卡、推理失败后的租约与资源释放。
 - 冷启动、端到端 P50/P95/P99、完成吞吐、错误率和资源峰值。
 - 长文档与 24/72 小时持续负载、退出/重启循环和过载恢复。

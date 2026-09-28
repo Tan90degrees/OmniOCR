@@ -19,6 +19,7 @@ Json normalize_config(const Json& config) {
     if (config.contains("server")) normalized["server"]=config.at("server");
     if (config.contains("document")) normalized["document"]=config.at("document");
     if (config.contains("output")) normalized["output"]=config.at("output");
+    if (config.contains("postprocess")) normalized["postprocess"]=config.at("postprocess");
     for (const auto& [id, executor] : executors.items()) {
         Json m=executor;
         if (!m.is_object()) throw std::runtime_error("config v2 executor must be an object: "+id);
