@@ -22,11 +22,22 @@ Image allocate(int w, int h) {
     return {w, h, std::vector<uint8_t>(size_t(w) * h * 3)};
 }
 }
+ImageLimits image_file_limits(const Json& settings) {
+    const auto limits = settings.value("image_limits", Json::object());
+    return {limits.value("max_pixels", settings.value("max_pixels", uint64_t(100000000))),
+            limits.value("max_width", std::numeric_limits<int>::max()),
+            limits.value("max_height", std::numeric_limits<int>::max())};
+}
 Image Image::load(const fs::path& p, uint64_t max_pixels) {
+    return load(p, ImageLimits{max_pixels});
+}
+Image Image::load(const fs::path& p, const ImageLimits& limits) {
     int w, h, c;
     if (!stbi_info(p.c_str(), &w, &h, &c) || w <= 0 || h <= 0)
         throw std::runtime_error("cannot read image: " + p.string());
-    if (uint64_t(w) * h > max_pixels) throw std::runtime_error("image exceeds max_pixels");
+    if (uint64_t(w) * h > limits.max_pixels) throw std::runtime_error("image exceeds max_pixels");
+    if (w > limits.max_width) throw std::runtime_error("image exceeds max_width");
+    if (h > limits.max_height) throw std::runtime_error("image exceeds max_height");
     auto pixels = std::unique_ptr<stbi_uc, decltype(&stbi_image_free)>(
         stbi_load(p.c_str(), &w, &h, &c, 4), stbi_image_free);
     if (!pixels) throw std::runtime_error("image decoding failed: " + p.string());

@@ -3,7 +3,6 @@
   "document": {
     "dpi": 150,
     "max_pages": 1000,
-    "max_pixels": 40000000,
     "timeout_seconds": 120
   },
   "execution": {

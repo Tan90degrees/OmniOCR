@@ -376,6 +376,13 @@ void validate_config(const Json& c) {
     positive(doc, "max_pages", 1000, 100000);
     positive(doc, "timeout_seconds", 120, 3600);
     positive(doc, "max_pixels", 40000000, 200000000);
+    const auto image_limits = doc.value("image_limits", Json::object());
+    require(image_limits.is_object(), "document.image_limits must be an object");
+    for (const auto& [key, value] : image_limits.items()) {
+        require(key == "max_width" || key == "max_height" || key == "max_pixels",
+                "unknown document.image_limits setting: " + key);
+        bounded(image_limits, key.c_str(), 1, key == "max_pixels" ? 200000000 : 100000);
+    }
     positive(doc, "max_csv_bytes", 16777216, 268435456);
     const auto delimiter = doc.value("csv_delimiter", std::string(","));
     require(delimiter == "," || delimiter == ";" || delimiter == "\t" || delimiter == "|",

@@ -15,7 +15,9 @@
 | `execution.max_queued_pages` | 2 | 待处理页面队列长度，范围 1–256 |
 | `execution.on_error` | `fail` | `fail` 或 `record`，仅控制 BOX 错误 |
 | `document.dpi` | 150 | PDF 渲染分辨率请求；像素上限会约束最终分辨率 |
-| `document.max_pixels` | 40000000 | 图片最大像素数；PDF 最大边长设为其平方根 |
+| `document.max_pixels` | 40000000 | PDF/转换文档的页面像素上限；显式设置时也作为图片文件的兼容默认值 |
+| `document.image_limits.max_pixels` | 100000000 | PNG/JPEG/BMP/PPM/PGM/TGA 和 TIFF 每页的像素上限，范围 1–200000000；优先于显式 `document.max_pixels` |
+| `document.image_limits.max_width/max_height` | 不限制 | 图片文件宽/高上限，各可配置 1–100000 |
 | `document.max_pages` | 1000 | 超过则整份拒绝，不静默截断 |
 | `document.timeout_seconds` | 120 | 每次转换/渲染命令的超时 |
 | `document.soffice/pdfinfo/pdftoppm` | 对应命令名 | 可指定可执行文件绝对路径 |
@@ -33,6 +35,8 @@
 | `postprocess` | 全部关闭 | 可选的 BOX 后处理与跨页表格合并，见下节 |
 
 服务专属的 `server` 配置可设置 `data_dir`、`allowed_input_root`、`host`、`port`、`api_key_env`、`max_upload_bytes`、`max_jobs`、`max_active_jobs`、`max_inflight_upload_bytes`、`max_queued_page_bytes`、`http_connections`、`connection_timeout_seconds`、`max_result_bytes` 和 `max_asset_bytes`。范围、启动样例和安全边界见[REST 服务](server.md#构建及启动)。批处理清单的 `options` 可覆盖 `execution` 中对应的调度设置；服务启动参数可覆盖配置文件。三种模式均复用模型池参数和 BOX 路由，无需改代码。未识别的 `execution`/`server` 键或越界值会在启动前报错。配置在进程启动时读取，修改工作线程数或模型实例数后须重启服务。
+
+`document.image_limits` 在解码图片文件前检查原始宽、高与像素数，超限即拒绝；TIFF 逐页检查，**不会缩小源图片**。没有设置 `image_limits.max_pixels` 时，如果显式设置了旧字段 `document.max_pixels`，图片继续继承该值；否则图片默认上限为 1 亿像素。PDF 及其他文档渲染仍独立使用 `document.max_pixels`（默认 4000 万）。该输入限制与模型级 `input_resize` 分别作用于解码前和推理前；模型缩放不能规避输入限制。示例：`"document": {"image_limits": {"max_width": 12000, "max_height": 12000, "max_pixels": 100000000}}`。
 
 `routes` 的键是经过 type_map 的类型名；`*` 是兜底。未命中且无兜底时按 on_error 处理。每个 route 的 `action` 默认为 `recognize`，须在 `model`（单个模型 ID）和 `models`（非空、不可重复的模型 ID 数组）中**二选一**；可设置 route 级 `prompt` 和 `save_crop`。`image` 只保存裁剪，`skip` 跳过识别但仍在 JSON 保留 BOX。
 
