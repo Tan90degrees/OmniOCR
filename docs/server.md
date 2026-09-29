@@ -116,6 +116,8 @@ curl -X DELETE -H "Authorization: Bearer $OCR_API_KEY" \
 
 `GET /v1/metrics` 返回受相同 API key 保护的 JSON 快照：`active_jobs`、`reserved_jobs`、`queued_documents`、`queued_pages`、`queued_page_bytes`、`reserved_page_bytes`、`inflight_upload_bytes` 以及 `admitted_total`、`succeeded_total`、`failed_total`、`cancelled_total`、`rejected_total`。已接受任务满足 `admitted_total = succeeded_total + failed_total + cancelled_total + active_jobs`；预留请求另见 `reserved_jobs`。计数器只覆盖当前进程，重启后清零，不是 Prometheus 文本格式。429 和累计容量 503 均计入 `rejected_total`。
 
+`models.<id>` 下的 `inflight` 按正在执行的 BOX 请求计数，原生组批时一批内的每个 BOX 都计入；`completed_total` 为完成的 BOX 请求数（含失败），`failed_total` 为其中失败数，`overload_total` 为收到后端 429/503 的请求数。固定与自适应模式都更新这些基本指标；等待实例超时的请求计入 `acquisition_timeout_total`，不会计入已完成的推理请求。自适应控制专用的 `window_*` 指标在固定模式下不更新。
+
 ## 调度和部署边界
 
 `execution.document_workers`（默认 2）控制同时进行文件读取、PDF 渲染、Office 转换的文档数，按待处理文件优先级领取任务；`execution.max_queued_pages`（默认 2）约束就绪页面队列；`server.max_queued_page_bytes`（默认 256 MiB）同时约束队列中 RGB 图像与拷贝预留字节，超过单页限制的渲染页使所属任务失败。读取线程完成页面拷贝前会预留名额与字节；其他线程可继续调度。`execution.page_workers`（默认取 `execution.workers`，否则 4）限制同时在处理的页面数；`execution.box_workers`（默认 1，范围 1–128）是**所有页面共享**的 BOX 工作线程数，设置为大于 1 时单页多个 BOX 能同时识别，不会为每页再创建一套 BOX 线程。每页最多向全局池提交 `min(BOX 数, box_workers)` 个任务；布局仍先在页面线程完成。各模型还受自己的 `max_concurrent_requests`（默认 `instances`）限制。高优先级文件的**已就绪页面**优先取得空闲页面线程；BOX 池的排队不继承文件优先级。每个文件按页号和 BOX 原顺序汇总结果，文件失败不会中断其他任务；断开 HTTP 连接不取消已提交任务。

@@ -176,6 +176,7 @@ void pool_test() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             --s.active; entered = false;
             if (prompt == "fail") throw std::runtime_error("injected failure");
+            if (prompt == "overload") throw HttpStatusError(429);
             return {{"text", prompt}};
         }
     };
@@ -189,6 +190,12 @@ void pool_test() {
     for (auto& future : futures) future.get();
     expect(state.constructed == 2 && state.peak == 2 && state.active == 0, "pool bound or lease leak");
     expect(registry.infer("shared", image(), "after")["text"] == "after", "lease not returned after exception");
+    throws([&] { registry.infer("shared", image(), "overload"); });
+    const auto fixed_metrics=registry.scheduler_metrics().at("shared");
+    expect(fixed_metrics.at("completed_total")==22 && fixed_metrics.at("failed_total")==8 &&
+           fixed_metrics.at("overload_total")==1 && fixed_metrics.at("inflight")==0 &&
+           fixed_metrics.at("completed_normalized_work_total")>0,
+           "fixed scalar pool must count successes, failures and overloads");
     throws([&] { registry.infer("missing", image(), ""); });
     State expanded;
     ModelRegistry extra({{"ocr", {{"instances", 1}, {"max_concurrent_requests", 4},
@@ -219,9 +226,17 @@ void pool_test() {
         [&](const Json&, size_t) { return std::make_unique<Gate>(started, released); });
     auto job = std::async(std::launch::async, [&] { single.infer("m", image(), ""); });
     started.get_future().wait();
+    expect(single.scheduler_metrics()["m"]["inflight"]==1 &&
+           single.scheduler_metrics()["m"]["completed_total"]==0,
+           "fixed scalar inflight must be visible during inference");
     bool timed_out = false;
     try { single.infer("m", image(), ""); } catch (...) { timed_out = true; }
     release.set_value(); job.get(); expect(timed_out, "pool acquisition did not time out");
+    expect(single.scheduler_metrics()["m"]["completed_total"]==1 &&
+           single.scheduler_metrics()["m"]["failed_total"]==0 &&
+           single.scheduler_metrics()["m"]["inflight"]==0 &&
+           single.scheduler_metrics()["m"]["acquisition_timeout_total"]==1,
+           "queued timeout must not count as backend failure");
 }
 void model_input_resize_test() {
     struct Dimensions : Model {
@@ -607,6 +622,23 @@ void dynamic_batch_test() {
            "partial batch did not flush by deadline");
     expect(state.groups.size() == 2 && state.groups[1].size() == 1,
            "partial batch should be one native invocation");
+    const auto batch_metrics=shared.scheduler_metrics().at("ocr");
+    expect(batch_metrics.at("completed_total")==5 && batch_metrics.at("failed_total")==0 &&
+           batch_metrics.at("inflight")==0 &&
+           batch_metrics.at("completed_normalized_work_total")>0,
+           "fixed native batch must count each completed BOX");
+    struct FailBatch : Model {
+        Json infer(const Image&, const std::string&) override { throw std::runtime_error("scalar called"); }
+        bool supports_batch() const override { return true; }
+        std::vector<Json> infer_batch(const std::vector<BatchInput>&) override { throw HttpStatusError(503); }
+    };
+    ModelRegistry failing({{"ocr",{{"batch_size",2},{"max_batch_wait_ms",1}}}},
+        [](const Json&,size_t){return std::make_unique<FailBatch>();});
+    throws([&]{failing.infer("ocr",img,"bad");});
+    const auto failed_batch=failing.scheduler_metrics().at("ocr");
+    expect(failed_batch.at("completed_total")==1 && failed_batch.at("failed_total")==1 &&
+           failed_batch.at("overload_total")==1 && failed_batch.at("inflight")==0,
+           "fixed native batch must count failed BOXes and backend overload");
     // Each instance takes work from the same FIFO, even when batch profiles
     // differ. Verify native batch sizing, instance affinity and result routing.
     std::promise<void> scalar_started, release_scalar, batch_started;
@@ -709,6 +741,10 @@ void dynamic_batch_test() {
     expect(running.get()["text"] == "recovered" &&
            blocked.infer("m", img, "after timeout")["text"] == "recovered",
            "timed out request leaked into the next batch");
+    const auto recovered=blocked.scheduler_metrics().at("m");
+    expect(recovered.at("completed_total")==2 && recovered.at("failed_total")==0 &&
+           recovered.at("inflight")==0 && recovered.at("acquisition_timeout_total")==1,
+           "native batch timeout must remain separate from backend completion counts");
     auto invalid_config = config();
     invalid_config["models"]["shared"]["max_concurrent_requests"] = 0;
     throws([&] { validate_config(invalid_config); });
