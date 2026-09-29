@@ -71,6 +71,7 @@ public:
     ~ModelRegistry();
     ModelRegistry(const ModelRegistry&) = delete;
     ModelRegistry& operator=(const ModelRegistry&) = delete;
+    std::array<int, 2> input_size(const std::string& id, const Image&) const;
     Json infer(const std::string& id, const Image&, const std::string& prompt);
     Json scheduler_metrics();
 private:

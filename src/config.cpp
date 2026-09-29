@@ -98,6 +98,16 @@ void validate_config(const Json& c) {
                                     "max_batch_wait_ms must be less than acquire_timeout_ms");
         const auto backend = m.at("backend").get<std::string>();
         require(has_backend(backend), "unknown backend plugin " + backend);
+        if (m.contains("input_resize")) {
+            const auto& resize=m.at("input_resize");
+            require(resize.is_object() && !resize.empty(),
+                    "input_resize must be a nonempty object: " + id);
+            for (const auto& [key,value]:resize.items()) {
+                require(key=="max_width" || key=="max_height" || key=="max_pixels",
+                        "unknown input_resize setting: " + key);
+                bounded(resize,key.c_str(),1,key=="max_pixels" ? 200000000 : 100000);
+            }
+        }
         if (m.contains("adaptive_concurrency")) {
             const auto& adaptive = m.at("adaptive_concurrency");
             require(adaptive.is_object(), "adaptive_concurrency must be an object");
@@ -209,6 +219,8 @@ void validate_config(const Json& c) {
                 "layout image_size requires MinerU or V3 model_input coordinates");
     }
     if (layout.contains("transform")) {
+        require(!models.at(layout.at("model").get<std::string>()).contains("input_resize"),
+                "layout explicit transform cannot be combined with model input_resize");
         require(adapter == "paddle.doclayout_v3.http" && coordinates == "model_input" &&
                 layout.contains("image_size"),
                 "explicit transform requires V3 model_input and image_size");

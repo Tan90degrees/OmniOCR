@@ -124,6 +124,7 @@ void v2_config_test() {
                 {{"type","text"},{"bbox",{0,0,1,1}}}
             })}}}}},
             {"ocr_pool",{{"backend","mock"},{"max_inflight",1},{"max_concurrent_requests",2},{"batch_size",2},
+                         {"input_resize",{{"max_width",1280},{"max_pixels",1000000}}},
                          {"instance_overrides",Json::array({{{"batch_size",2}},Json::object()})},
                          {"response",{{"text","v2 recognition"}}}}}
         }},
@@ -137,6 +138,7 @@ void v2_config_test() {
     auto runtime=normalize_config(c);
     expect(runtime["version"]==1 && runtime["models"].size()==2 &&
            runtime["models"]["ocr_pool"]["batch_size"]==2 &&
+           runtime["models"]["ocr_pool"]["input_resize"]["max_width"]==1280 &&
            runtime["models"]["ocr_pool"]["instance_overrides"].size()==2 &&
            runtime["models"]["ocr_pool"]["instances"]==1 &&
            runtime["models"]["ocr_pool"]["max_concurrent_requests"]==2 &&
@@ -217,6 +219,86 @@ void pool_test() {
     bool timed_out = false;
     try { single.infer("m", image(), ""); } catch (...) { timed_out = true; }
     release.set_value(); job.get(); expect(timed_out, "pool acquisition did not time out");
+}
+void model_input_resize_test() {
+    struct Dimensions : Model {
+        Json infer(const Image& image,const std::string&) override {
+            return {{"width",image.width},{"height",image.height},{"text","ok"}};
+        }
+        bool supports_batch() const override {return true;}
+        std::vector<Json> infer_batch(const std::vector<BatchInput>& inputs) override {
+            std::vector<Json> results;
+            for (const auto& input:inputs) results.push_back(infer(*input.image,input.prompt));
+            return results;
+        }
+    };
+    Image large{100,60,std::vector<uint8_t>(100*60*3,255)};
+    Json models={{"a",{{"input_resize",{{"max_width",40},{"max_height",40},{"max_pixels",1000}}}}},
+                 {"b",{{"input_resize",{{"max_width",30}}}}}};
+    ModelRegistry registry(models,[](const Json&,size_t){return std::make_unique<Dimensions>();});
+    expect(registry.input_size("a",large)==std::array<int,2>{40,24} &&
+           registry.infer("a",large,"")["width"]==40 &&
+           registry.infer("b",large,"")["width"]==30 &&
+           registry.infer("a",image(),"")["width"]==20,
+           "model-specific resize must preserve aspect ratio and avoid upscaling");
+    models["a"]["batch_size"]=2;
+    models["a"]["max_batch_wait_ms"]=1;
+    ModelRegistry batched(models,[](const Json&,size_t){return std::make_unique<Dimensions>();});
+    auto first=std::async(std::launch::async,[&]{return batched.infer("a",large,"");});
+    auto second=std::async(std::launch::async,[&]{return batched.infer("a",large,"");});
+    expect(first.get()["height"]==24 && second.get()["height"]==24,
+           "queued batch inputs must own resized images until inference completes");
+
+    TempDir temp;
+    const auto png=large.png();
+    {std::ofstream out(temp.path/"input.png",std::ios::binary);
+     out.write(reinterpret_cast<const char*>(png.data()),std::streamsize(png.size()));}
+    auto c=config();
+    c["layout"]["coordinates"]="pixel";
+    c["models"]["layout"]["input_resize"]={{"max_width",50}};
+    c["models"]["layout"]["response"]={{"boxes",Json::array({
+        {{"type","text"},{"bbox",{10,5,40,25}}}})}};
+    c["models"]["shared"]["input_resize"]={{"max_width",20},{"max_pixels",200}};
+    struct LayoutFixture : Model {
+        Json response;std::atomic<int>& layout_width;std::atomic<int>& ocr_width;
+        LayoutFixture(Json r,std::atomic<int>& l,std::atomic<int>& o):
+            response(std::move(r)),layout_width(l),ocr_width(o){}
+        Json infer(const Image& image,const std::string&) override {
+            if (response.contains("boxes")) {layout_width=image.width;return response;}
+            ocr_width=image.width;return {{"text","ok"}};
+        }
+    };
+    std::atomic<int> layout_width{0},ocr_width{0};
+    auto run=[&](const Json& settings,const char* out) {
+        return Pipeline(settings,[&](const Json& model,size_t) {
+            return std::make_unique<LayoutFixture>(model.at("response"),layout_width,ocr_width);
+        }).run(temp.path/"input.png",temp.path/out);
+    };
+    validate_config(c);
+    auto doc=run(c,"pixel");
+    expect(layout_width==50 && ocr_width==17 && doc.pages[0].regions.size()==1 &&
+           doc.pages[0].regions[0].box.bbox==std::array<double,4>{20,10,80,50},
+           "pixel-space layout geometry must map from model input to original page");
+    c["layout"]={{"provider","paddle.doclayout_v3.http"},{"adapter","paddle.doclayout_v3.http"},
+        {"model","layout"},{"coordinates","model_input"},{"image_size",{100,60}}};
+    c["models"]["layout"]["response"]={{"boxes",Json::array({
+        {{"label","text"},{"coordinate",{10,5,40,25}},
+         {"polygon_points",{{9,4},{41,4},{41,26},{9,26}}}}})}};
+    validate_config(c);
+    doc=run(c,"model_input");
+    const auto& box=doc.pages[0].regions[0].box;
+    expect(box.bbox==std::array<double,4>{20,10,80,50} &&
+           box.polygon[0]==std::array<double,2>{18,8} &&
+           box.crop_bbox==std::optional<std::array<double,4>>({18,8,82,52}),
+           "V3 model_input geometry and crop metadata must use resized dimensions");
+    c["layout"]["transform"]={{"matrix",{2,0,0,0,2,0,0,0,1}}};
+    throws([&]{validate_config(c);});
+    c["layout"].erase("transform");
+    c["models"]["shared"]["input_resize"]["max_pixels"]=0;
+    throws([&]{validate_config(c);});
+    c["models"]["shared"]["input_resize"]["max_pixels"]=200;
+    c["models"]["shared"]["input_resize"]["unknown"]=1;
+    throws([&]{validate_config(c);});
 }
 void cancellation_pool_test() {
     std::promise<void> entered, release;
@@ -1095,7 +1177,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); model_input_resize_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
