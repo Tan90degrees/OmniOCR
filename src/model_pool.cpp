@@ -40,6 +40,8 @@ struct ModelRegistry::Impl {
         std::condition_variable ready;
         int timeout_ms;
         int max_pending = 256, max_concurrent = 1;
+        int input_max_width = 0, input_max_height = 0;
+        uint64_t input_max_pixels = 0;
         bool batching = false;
         bool stopping = false;
         // All feedback and leases are protected by mutex. max_concurrent is a
@@ -66,6 +68,17 @@ struct ModelRegistry::Impl {
         bool window_overload = false;
         std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point backoff_until{};
+        std::array<int, 2> input_size(const Image& image) const {
+            if (image.width<=0 || image.height<=0) throw std::runtime_error("invalid model input dimensions");
+            const double pixels=double(image.width)*image.height;
+            double scale=1.0;
+            if (input_max_width) scale=std::min(scale,double(input_max_width)/image.width);
+            if (input_max_height) scale=std::min(scale,double(input_max_height)/image.height);
+            if (input_max_pixels) scale=std::min(scale,std::sqrt(double(input_max_pixels)/pixels));
+            if (scale>=1.0) return {image.width,image.height};
+            return {std::max(1,int(std::floor(image.width*scale))),
+                    std::max(1,int(std::floor(image.height*scale)))};
+        }
         size_t estimate_tokens(const Image& image, const std::string& prompt) const {
             const uint64_t pixels = uint64_t(std::max(1, image.width)) * uint64_t(std::max(1, image.height));
             const uint64_t raw = 64 + (prompt.size() + 3) / 4 + uint64_t(expected_output_tokens) +
@@ -306,9 +319,16 @@ struct ModelRegistry::Impl {
         }
         Json infer(const Image& image, const std::string& prompt) {
             throw_if_cancelled();
+            std::optional<Image> resized;
+            const Image* input=&image;
+            const auto size=input_size(image);
+            if (size[0]!=image.width || size[1]!=image.height) {
+                resized.emplace(image.resize(size[0],size[1]));
+                input=&*resized;
+            }
             if (batching) {
                 auto request = std::make_shared<Request>();
-                request->input = {&image, prompt};
+                request->input = {input, prompt};
                 request->queued_at = std::chrono::steady_clock::now();
                 auto result = request->answer.get_future();
                 std::unique_lock<std::mutex> lock(mutex);
@@ -348,8 +368,8 @@ struct ModelRegistry::Impl {
                 phase = Phase::SlowStart;
             }
             const auto ticket = next_ticket++;
-            const size_t tokens = adaptive ? estimate_tokens(image, prompt) : 0;
-            const size_t work = adaptive ? normalized_work(image, prompt) : 0;
+            const size_t tokens = adaptive ? estimate_tokens(*input, prompt) : 0;
+            const size_t work = adaptive ? normalized_work(*input, prompt) : 0;
             const auto queued_at = std::chrono::steady_clock::now();
             scalar_queue.push_back({ticket, tokens});
             const bool budget_blocked = adaptive && inflight &&
@@ -398,7 +418,7 @@ struct ModelRegistry::Impl {
             } lease{*this, index};
             if (!adaptive) {
                 throw_if_cancelled();
-                auto response = models[index]->infer(image, prompt);
+                auto response = models[index]->infer(*input, prompt);
                 throw_if_cancelled();
                 return response;
             }
@@ -419,7 +439,7 @@ struct ModelRegistry::Impl {
             } feedback{*this, tokens, work, index, epoch, failed, overloaded, start};
             try {
                 throw_if_cancelled();
-                auto response = models[index]->infer(image, prompt);
+                auto response = models[index]->infer(*input, prompt);
                 throw_if_cancelled();
                 return response;
             }
@@ -444,6 +464,24 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
         const int default_batch = config.value("batch_size", 1);
         const int default_wait = config.value("max_batch_wait_ms", 5);
         pool->max_pending = config.value("max_pending_requests", 256);
+        if (config.contains("input_resize")) {
+            const auto& resize=config.at("input_resize");
+            if (!resize.is_object() || resize.empty())
+                throw std::runtime_error("input_resize must be a nonempty object: " + id);
+            for (const auto& [key,value]:resize.items()) {
+                if (key!="max_width" && key!="max_height" && key!="max_pixels")
+                    throw std::runtime_error("unknown input_resize setting: " + key);
+                const uint64_t limit=key=="max_pixels" ? 200000000 : 100000;
+                if (!(value.is_number_integer() || value.is_number_unsigned()) ||
+                    (value.is_number_unsigned() ?
+                        value.get<uint64_t>()<1 || value.get<uint64_t>()>limit :
+                        value.get<int64_t>()<1 || uint64_t(value.get<int64_t>())>limit))
+                    throw std::runtime_error("invalid input_resize." + key + ": " + id);
+            }
+            pool->input_max_width=resize.value("max_width",0);
+            pool->input_max_height=resize.value("max_height",0);
+            pool->input_max_pixels=resize.value("max_pixels",uint64_t(0));
+        }
         const int count = config.value("instances", 1);
         if (count <= 0 || count > 128) throw std::runtime_error("invalid instances for " + id);
         pool->max_concurrent = config.value("max_concurrent_requests", count);
@@ -525,6 +563,11 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
     }
 }
 ModelRegistry::~ModelRegistry() = default;
+std::array<int, 2> ModelRegistry::input_size(const std::string& id, const Image& image) const {
+    auto it=impl_->pools.find(id);
+    if (it==impl_->pools.end()) throw std::runtime_error("unknown model: " + id);
+    return it->second->input_size(image);
+}
 Json ModelRegistry::infer(const std::string& id, const Image& image, const std::string& prompt) {
     auto it = impl_->pools.find(id);
     if (it == impl_->pools.end()) throw std::runtime_error("unknown model: " + id);

@@ -28,9 +28,33 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                 small=original.resize(layout.at("image_size").at(0),layout.at("image_size").at(1));
                 layout_image=&small;
             }
+            Image limited;
+            const auto size=models_->input_size(layout.at("model"),*layout_image);
+            if (size[0]!=layout_image->width || size[1]!=layout_image->height) {
+                limited=layout_image->resize(size[0],size[1]);
+                layout_image=&limited;
+            }
             auto response=models_->infer(layout.at("model"),*layout_image,
                 layout.value("prompt",layout.at("provider")=="mineru" ? "\nLayout Detection:" : ""));
-            return parse_layout(response,layout,original.width,original.height);
+            Json coordinates=layout;
+            const auto space=layout.value("coordinates",std::string("pixel"));
+            if (space=="model_input" && !layout.contains("transform"))
+                coordinates["image_size"]={layout_image->width,layout_image->height};
+            if (space!="pixel" || (layout_image->width==original.width && layout_image->height==original.height))
+                return parse_layout(response,coordinates,original.width,original.height);
+            // Pixel-space detector output belongs to the actual model input.
+            // Map boxes and crop metadata back to the rendered page before OCR.
+            auto boxes=parse_layout(response,coordinates,layout_image->width,layout_image->height);
+            const double sx=double(original.width)/layout_image->width;
+            const double sy=double(original.height)/layout_image->height;
+            for (auto& box:boxes) {
+                box.bbox={box.bbox[0]*sx,box.bbox[1]*sy,box.bbox[2]*sx,box.bbox[3]*sy};
+                if (box.crop_bbox)
+                    box.crop_bbox=std::array<double,4>{(*box.crop_bbox)[0]*sx,(*box.crop_bbox)[1]*sy,
+                                                       (*box.crop_bbox)[2]*sx,(*box.crop_bbox)[3]*sy};
+                for (auto& point:box.polygon) {point[0]*=sx;point[1]*=sy;}
+            }
+            return boxes;
         };
         auto boxes=postprocess_boxes(detect(image),
             config_.value("postprocess",Json::object()),image,detect);
