@@ -103,10 +103,25 @@ void validate_config(const Json& c) {
             require(resize.is_object() && !resize.empty(),
                     "input_resize must be a nonempty object: " + id);
             for (const auto& [key,value]:resize.items()) {
-                require(key=="max_width" || key=="max_height" || key=="max_pixels",
+                require(key=="max_width" || key=="max_height" || key=="max_pixels" ||
+                        key=="min_width" || key=="min_height" || key=="min_pixels" || key=="factor",
                         "unknown input_resize setting: " + key);
-                bounded(resize,key.c_str(),1,key=="max_pixels" ? 200000000 : 100000);
+                bounded(resize,key.c_str(),1,key=="max_pixels" || key=="min_pixels" ? 200000000 :
+                    key=="factor" ? 4096 : 100000);
             }
+            const int factor=resize.value("factor",1);
+            const int min_w=resize.value("min_width",1),max_w=resize.value("max_width",100000);
+            const int min_h=resize.value("min_height",1),max_h=resize.value("max_height",100000);
+            const uint64_t min_p=resize.value("min_pixels",uint64_t(0));
+            const uint64_t max_p=resize.value("max_pixels",std::numeric_limits<uint64_t>::max());
+            require(min_w<=max_w && min_h<=max_h && min_p<=max_p,
+                    "conflicting input_resize bounds: " + id);
+            const uint64_t lo_w=uint64_t((min_w+factor-1)/factor)*factor;
+            const uint64_t lo_h=uint64_t((min_h+factor-1)/factor)*factor;
+            const uint64_t hi_w=uint64_t(max_w/factor)*factor;
+            const uint64_t hi_h=uint64_t(max_h/factor)*factor;
+            require(lo_w<=hi_w && lo_h<=hi_h && lo_w*lo_h<=max_p && hi_w*hi_h>=min_p,
+                    "infeasible input_resize bounds: " + id);
         }
         if (m.contains("adaptive_concurrency")) {
             const auto& adaptive = m.at("adaptive_concurrency");

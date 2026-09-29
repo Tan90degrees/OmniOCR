@@ -124,7 +124,8 @@ void v2_config_test() {
                 {{"type","text"},{"bbox",{0,0,1,1}}}
             })}}}}},
             {"ocr_pool",{{"backend","mock"},{"max_inflight",1},{"max_concurrent_requests",2},{"batch_size",2},
-                         {"input_resize",{{"max_width",1280},{"max_pixels",1000000}}},
+                         {"input_resize",{{"max_width",1280},{"max_pixels",1000000},
+                                          {"min_width",28},{"min_pixels",784},{"factor",28}}},
                          {"instance_overrides",Json::array({{{"batch_size",2}},Json::object()})},
                          {"response",{{"text","v2 recognition"}}}}}
         }},
@@ -139,6 +140,8 @@ void v2_config_test() {
     expect(runtime["version"]==1 && runtime["models"].size()==2 &&
            runtime["models"]["ocr_pool"]["batch_size"]==2 &&
            runtime["models"]["ocr_pool"]["input_resize"]["max_width"]==1280 &&
+           runtime["models"]["ocr_pool"]["input_resize"]["factor"]==28 &&
+           runtime["models"]["ocr_pool"]["input_resize"]["min_pixels"]==784 &&
            runtime["models"]["ocr_pool"]["instance_overrides"].size()==2 &&
            runtime["models"]["ocr_pool"]["instances"]==1 &&
            runtime["models"]["ocr_pool"]["max_concurrent_requests"]==2 &&
@@ -241,6 +244,29 @@ void model_input_resize_test() {
            registry.infer("b",large,"")["width"]==30 &&
            registry.infer("a",image(),"")["width"]==20,
            "model-specific resize must preserve aspect ratio and avoid upscaling");
+    models["smart"]={{"input_resize",{{"factor",28},{"min_pixels",28*28*130},
+                                       {"max_pixels",28*28*1280}}}};
+    ModelRegistry smart(models,[](const Json&,size_t){return std::make_unique<Dimensions>();});
+    const auto enlarged=smart.input_size("smart",image());
+    expect(enlarged[0]%28==0 && enlarged[1]%28==0 &&
+           enlarged[0]*enlarged[1]>=28*28*130 &&
+           enlarged[0]*enlarged[1]<=28*28*1280 &&
+           smart.infer("smart",image(),"")["width"]==enlarged[0],
+           "smart resize must upscale small inputs and align dimensions to factor");
+    Image narrow{10,2000,{}};
+    expect(smart.input_size("smart",narrow)==std::array<int,2>{28,5600},
+           "a sub-factor short edge must expand with its long edge before pixel constraints");
+    models["exact"]={{"input_resize",{{"factor",28},{"min_pixels",28*28*2},
+                                       {"max_pixels",28*28*2}}}};
+    ModelRegistry exact(models,[](const Json&,size_t){return std::make_unique<Dimensions>();});
+    expect(exact.input_size("exact",large)==std::array<int,2>{56,28},
+           "pixel interval must hold even when factor quantization crosses a bound");
+    models["constraints"]={{"input_resize",{{"factor",10},{"min_width",50},{"max_width",70},
+                                             {"min_height",20},{"max_height",30},
+                                             {"min_pixels",1600},{"max_pixels",2100}}}};
+    ModelRegistry constrained(models,[](const Json&,size_t){return std::make_unique<Dimensions>();});
+    expect(constrained.input_size("constraints",large)==std::array<int,2>{60,30},
+           "all six optional bounds must apply to the final aligned size");
     models["a"]["batch_size"]=2;
     models["a"]["max_batch_wait_ms"]=1;
     ModelRegistry batched(models,[](const Json&,size_t){return std::make_unique<Dimensions>();});
@@ -279,6 +305,14 @@ void model_input_resize_test() {
     expect(layout_width==50 && ocr_width==17 && doc.pages[0].regions.size()==1 &&
            doc.pages[0].regions[0].box.bbox==std::array<double,4>{20,10,80,50},
            "pixel-space layout geometry must map from model input to original page");
+    c["models"]["layout"]["input_resize"]={{"min_width",200}};
+    c["models"]["layout"]["response"]={{"boxes",Json::array({
+        {{"type","text"},{"bbox",{40,20,160,100}}}})}};
+    validate_config(c);
+    doc=run(c,"pixel-upscale");
+    expect(layout_width==200 && doc.pages[0].regions[0].box.bbox==std::array<double,4>{20,10,80,50},
+           "pixel-space layout boxes must map back after an upscale");
+    c["models"]["layout"]["input_resize"]={{"max_width",50}};
     c["layout"]={{"provider","paddle.doclayout_v3.http"},{"adapter","paddle.doclayout_v3.http"},
         {"model","layout"},{"coordinates","model_input"},{"image_size",{100,60}}};
     c["models"]["layout"]["response"]={{"boxes",Json::array({
@@ -298,6 +332,13 @@ void model_input_resize_test() {
     throws([&]{validate_config(c);});
     c["models"]["shared"]["input_resize"]["max_pixels"]=200;
     c["models"]["shared"]["input_resize"]["unknown"]=1;
+    throws([&]{validate_config(c);});
+    c["models"]["shared"]["input_resize"].erase("unknown");
+    c["models"]["shared"]["input_resize"]["min_pixels"]=201;
+    throws([&]{validate_config(c);});
+    c["models"]["shared"]["input_resize"].erase("min_pixels");
+    c["models"]["shared"]["input_resize"]["factor"]=32;
+    c["models"]["shared"]["input_resize"]["max_width"]=20;
     throws([&]{validate_config(c);});
 }
 void cancellation_pool_test() {

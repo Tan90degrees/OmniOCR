@@ -82,18 +82,20 @@ v1 顶层和 v2 顶层都可设置 `postprocess`，所有开关默认为 `false`
 
 ### 每个模型的最大输入分辨率
 
-可在每个模型 ID 下设置 `input_resize`；v2 配置写在 `executors.<id>`。`max_width`、`max_height`、`max_pixels` 至少设置一项，同时设置时必须全部满足。按原始宽高比双线性缩小，不放大小图，结果宽高至少为 1。该处理在模型池入队和估算视觉 token **之前**进行，因此同一个模型实例被不同文件、BOX 类型或候选路由共享时使用相同上限；动态组批中的每个输入分别缩放。未设置时保持现有行为。
+可在每个模型 ID 下设置 `input_resize`；v2 配置写在 `executors.<id>`。`min_width`、`max_width`、`min_height`、`max_height`、`min_pixels`、`max_pixels` 全部可选，按实际模型约束组合；`factor` 可选，要求输出宽高为其整数倍。只设置上限时按比例缩小、不会放大小图；设置下限时允许按比例放大。像素范围约束的是最终输出的宽 × 高。缩放使用双线性插值，优先贴近原始宽高比；整除或上下限迫使取整时可能有细微比例误差。`factor` 默认 1，因此已有的仅设置上限的配置保持原行为。显式上限低于下限或量化后无可行尺寸时会报错。该处理在模型池入队和估算视觉 token **之前**进行，因此同一个模型实例被不同文件、BOX 类型或候选路由共享时使用相同约束；动态组批中的每个输入分别缩放。未设置时保持现有行为。
 
 ```json
 "models": {
   "layout": {"backend": "http_json", "endpoint": "http://127.0.0.1:8001/layout",
              "input_resize": {"max_width": 1600, "max_height": 1600}},
   "ocr": {"backend": "vllm", "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
-          "model": "served-vlm", "input_resize": {"max_pixels": 1048576, "max_width": 1536}}
+          "model": "served-vlm", "input_resize": {"factor": 28,
+              "min_width": 28, "min_height": 28, "min_pixels": 101920,
+              "max_width": 1536, "max_height": 1536, "max_pixels": 1003520}}
 }
 ```
 
-布局输出使用 `coordinates: pixel` 时，框架把模型输入尺寸的检测框、polygon 和 crop_bbox 映射回原页；`normalized` 和 MinerU 0–1000 坐标始终以原页为基准。V3 的 `model_input` 坐标自动使用最终输入尺寸；显式 `layout.transform` 与模型级 `input_resize` 不能同时配置，因为预先给定的逆变换不一定适用于缩放后的输入。原有 `layout.image_size` 仍可用于需要固定大小输入的布局模型，然后再受模型级上限约束。ONNX/ACL 的固定 `preprocess.width/height` 仍控制导出模型的张量形状，`input_resize` 是在其之前执行的可选上限；如果依赖 `original_shape` 输入，请核对相应模型的坐标解码。`save_crop` 保存原始裁剪，和实际送模型的缩小图可能不同。缩图会影响小字与表格精度，请按模型单独 A/B 验证吞吐和质量。
+布局输出使用 `coordinates: pixel` 时，框架把模型输入尺寸的检测框、polygon 和 crop_bbox 映射回原页；`normalized` 和 MinerU 0–1000 坐标始终以原页为基准。V3 的 `model_input` 坐标自动使用最终输入尺寸；显式 `layout.transform` 与模型级 `input_resize` 不能同时配置，因为预先给定的逆变换不一定适用于缩放后的输入。原有 `layout.image_size` 仍可用于需要固定大小输入的布局模型，然后再受模型级尺寸约束。ONNX/ACL 的固定 `preprocess.width/height` 仍控制导出模型的张量形状，`input_resize` 在其之前执行；如果依赖 `original_shape` 输入，请核对相应模型的坐标解码。`save_crop` 保存原始裁剪，和实际送模型的缩放图可能不同。缩小可能影响小字与表格精度，放大可能增加内存与推理开销，请按模型单独 A/B 验证吞吐和质量。
 
 每个模型 ID（v2 为每个 `executor`）独立设置 `batch_size`，默认 1，范围 1–128；大于 1 时启用全 Pipeline 共享的组批队列，同一模型来自**不同文件、页面和 BOX 类型**的请求可进入一批。`max_batch_wait_ms` 默认 5、范围 0–1000：从队首请求到达起最多等待该时间，达到批大小则立即执行，尾批到时执行；必须小于 `acquire_timeout_ms`。`max_pending_requests` 默认 256，至少等于 `batch_size`，排满或排队超时都会明确失败；候选模型可按原路由规则回退。`max_concurrent_requests` 控制并行批次数上限，每个活跃槽位执行一次原生批量调用；结果按提交顺序归还给原 BOX，文档输出仍按页号和阅读顺序排列。
 
