@@ -40,8 +40,11 @@ struct ModelRegistry::Impl {
         std::condition_variable ready;
         int timeout_ms;
         int max_pending = 256, max_concurrent = 1;
-        int input_max_width = 0, input_max_height = 0;
-        uint64_t input_max_pixels = 0;
+        int input_min_width = 1, input_min_height = 1;
+        int input_max_width = 100000, input_max_height = 100000;
+        int input_factor = 1;
+        uint64_t input_min_pixels = 0, input_max_pixels = std::numeric_limits<uint64_t>::max();
+        bool input_resize_enabled = false;
         bool batching = false;
         bool stopping = false;
         // All feedback and leases are protected by mutex. max_concurrent is a
@@ -70,14 +73,61 @@ struct ModelRegistry::Impl {
         std::chrono::steady_clock::time_point backoff_until{};
         std::array<int, 2> input_size(const Image& image) const {
             if (image.width<=0 || image.height<=0) throw std::runtime_error("invalid model input dimensions");
-            const double pixels=double(image.width)*image.height;
-            double scale=1.0;
-            if (input_max_width) scale=std::min(scale,double(input_max_width)/image.width);
-            if (input_max_height) scale=std::min(scale,double(input_max_height)/image.height);
-            if (input_max_pixels) scale=std::min(scale,std::sqrt(double(input_max_pixels)/pixels));
-            if (scale>=1.0) return {image.width,image.height};
-            return {std::max(1,int(std::floor(image.width*scale))),
-                    std::max(1,int(std::floor(image.height*scale)))};
+            if (!input_resize_enabled) return {image.width,image.height};
+            const int f=input_factor;
+            const int lo_w=std::max(f,((input_min_width+f-1)/f)*f);
+            const int lo_h=std::max(f,((input_min_height+f-1)/f)*f);
+            const int hi_w=(input_max_width/f)*f;
+            const int hi_h=(input_max_height/f)*f;
+            if (lo_w>hi_w || lo_h>hi_h) throw std::runtime_error("infeasible input_resize dimensions");
+            double source_w=image.width,source_h=image.height;
+            // Like smart_resize, expand a sub-factor short side first. This
+            // preserves the intended aspect ratio for very thin BOX crops.
+            if (source_h<f) {source_w=std::round(source_w*f/source_h);source_h=f;}
+            if (source_w<f) {source_h=std::round(source_h*f/source_w);source_w=f;}
+            const double pixels=source_w*source_h;
+            const double min_scale=std::max({double(lo_w)/source_w,double(lo_h)/source_h,
+                std::sqrt(double(input_min_pixels)/pixels)});
+            const double max_scale=std::min({double(hi_w)/source_w,double(hi_h)/source_h,
+                std::sqrt(double(input_max_pixels)/pixels)});
+            const double scale=std::clamp(1.0,std::min(min_scale,max_scale),std::max(min_scale,max_scale));
+            const auto quantize=[&](double dimension,int low,int high) {
+                const double units=dimension/f;
+                const double rounded=scale<1.0 ? std::floor(units+1e-10) :
+                                     scale>1.0 ? std::ceil(units-1e-10) : std::round(units);
+                return std::clamp(int(std::clamp(rounded,0.0,100000.0))*f,low,high);
+            };
+            const int candidate_w=quantize(source_w*scale,lo_w,hi_w);
+            const int candidate_h=quantize(source_h*scale,lo_h,hi_h);
+            const auto fits=[&](int w,int h) {
+                const uint64_t area=uint64_t(w)*h;
+                return w>=lo_w && w<=hi_w && h>=lo_h && h<=hi_h &&
+                    area>=input_min_pixels && area<=input_max_pixels;
+            };
+            if (fits(candidate_w,candidate_h)) return {candidate_w,candidate_h};
+
+            // Rounding each axis independently can cross a pixel bound. Search
+            // the feasible grid only in that case and retain the closest aspect
+            // ratio and scale; this path is uncommon for normal BOX sizes.
+            double best=std::numeric_limits<double>::infinity();
+            std::array<int,2> result{};
+            const double wanted_area=std::clamp(double(image.width)*image.height,
+                double(input_min_pixels),double(input_max_pixels));
+            for (int w=lo_w;w<=hi_w;w+=f) {
+                const int h_low=std::max(lo_h,int(((input_min_pixels+w-1)/w+f-1)/f)*f);
+                const int h_high=int(std::min(uint64_t(hi_h),(input_max_pixels/w/f)*uint64_t(f)));
+                if (h_low>h_high) continue;
+                const double ideal=double(w)*image.height/image.width;
+                const int middle=std::clamp(int(std::round(ideal/f))*f,h_low,h_high);
+                for (const int h : {h_low,middle,h_high}) {
+                    const double aspect=std::abs(std::log((double(w)/h)/(double(image.width)/image.height)));
+                    const double area=std::abs(std::log((double(w)*h)/wanted_area));
+                    const double score=aspect+area;
+                    if (score<best) {best=score;result={w,h};}
+                }
+            }
+            if (!std::isfinite(best)) throw std::runtime_error("no image size satisfies input_resize bounds");
+            return result;
         }
         size_t estimate_tokens(const Image& image, const std::string& prompt) const {
             const uint64_t pixels = uint64_t(std::max(1, image.width)) * uint64_t(std::max(1, image.height));
@@ -465,22 +515,33 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
         const int default_wait = config.value("max_batch_wait_ms", 5);
         pool->max_pending = config.value("max_pending_requests", 256);
         if (config.contains("input_resize")) {
+            pool->input_resize_enabled = true;
             const auto& resize=config.at("input_resize");
             if (!resize.is_object() || resize.empty())
                 throw std::runtime_error("input_resize must be a nonempty object: " + id);
             for (const auto& [key,value]:resize.items()) {
-                if (key!="max_width" && key!="max_height" && key!="max_pixels")
+                if (key!="max_width" && key!="max_height" && key!="max_pixels" &&
+                    key!="min_width" && key!="min_height" && key!="min_pixels" && key!="factor")
                     throw std::runtime_error("unknown input_resize setting: " + key);
-                const uint64_t limit=key=="max_pixels" ? 200000000 : 100000;
+                const uint64_t limit=key=="max_pixels" || key=="min_pixels" ? 200000000 :
+                                     key=="factor" ? 4096 : 100000;
                 if (!(value.is_number_integer() || value.is_number_unsigned()) ||
                     (value.is_number_unsigned() ?
                         value.get<uint64_t>()<1 || value.get<uint64_t>()>limit :
                         value.get<int64_t>()<1 || uint64_t(value.get<int64_t>())>limit))
                     throw std::runtime_error("invalid input_resize." + key + ": " + id);
             }
-            pool->input_max_width=resize.value("max_width",0);
-            pool->input_max_height=resize.value("max_height",0);
-            pool->input_max_pixels=resize.value("max_pixels",uint64_t(0));
+            pool->input_max_width=resize.value("max_width",100000);
+            pool->input_max_height=resize.value("max_height",100000);
+            pool->input_max_pixels=resize.value("max_pixels",std::numeric_limits<uint64_t>::max());
+            pool->input_min_width=resize.value("min_width",1);
+            pool->input_min_height=resize.value("min_height",1);
+            pool->input_min_pixels=resize.value("min_pixels",uint64_t(0));
+            pool->input_factor=resize.value("factor",1);
+            if (pool->input_min_width>pool->input_max_width ||
+                pool->input_min_height>pool->input_max_height ||
+                pool->input_min_pixels>pool->input_max_pixels)
+                throw std::runtime_error("conflicting input_resize bounds: " + id);
         }
         const int count = config.value("instances", 1);
         if (count <= 0 || count > 128) throw std::runtime_error("invalid instances for " + id);
