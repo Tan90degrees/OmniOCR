@@ -346,25 +346,44 @@ struct ModelRegistry::Impl {
                     for (size_t i = 0, count = std::min(queue.size(), size_t(profile.batch_size)); i < count; ++i) {
                         auto request = std::move(queue.front()); queue.pop_front();
                         request->started = true;
+                        queue_wait_ms_total += std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - request->queued_at).count();
                         batch.push_back(request);
                     }
+                    inflight += batch.size();
                 }
                 ready.notify_all();
+                std::vector<Json> responses;
+                std::exception_ptr error;
+                bool overloaded = false;
                 try {
                     std::vector<Model::BatchInput> inputs;
                     inputs.reserve(batch.size());
                     for (const auto& request : batch) inputs.push_back(request->input);
-                    auto responses = profile.batch_size == 1
+                    responses = profile.batch_size == 1
                         ? std::vector<Json>{models[index]->infer(*inputs[0].image, inputs[0].prompt)}
                         : models[index]->infer_batch(inputs);
                     if (responses.size() != batch.size())
                         throw std::runtime_error("batch model returned an incorrect number of results");
-                    for (size_t i = 0; i < batch.size(); ++i)
-                        batch[i]->answer.set_value(std::move(responses[i]));
+                } catch (const HttpStatusError& e) {
+                    overloaded = e.status == 429 || e.status == 503;
+                    error = std::current_exception();
                 } catch (...) {
-                    const auto error = std::current_exception();
-                    for (const auto& request : batch) request->answer.set_exception(error);
+                    error = std::current_exception();
                 }
+                {
+                    std::lock_guard<std::mutex> guard(mutex);
+                    inflight -= batch.size();
+                    completed_total += batch.size();
+                    if (error) failed_total += batch.size();
+                    else for (const auto& request : batch)
+                        completed_normalized_work_total += normalized_work(*request->input.image,request->input.prompt);
+                    if (overloaded) overload_total += batch.size();
+                    if (!queue.empty()) pressure_total += batch.size();
+                }
+                for (size_t i = 0; i < batch.size(); ++i)
+                    if (error) batch[i]->answer.set_exception(error);
+                    else batch[i]->answer.set_value(std::move(responses[i]));
             }
         }
         Json infer(const Image& image, const std::string& prompt) {
@@ -394,6 +413,7 @@ struct ModelRegistry::Impl {
                 if (!request->started) {
                     auto it = std::find(queue.begin(), queue.end(), request);
                     if (it != queue.end()) queue.erase(it);
+                    if (!cancellation_requested()) ++acquisition_timeout_total;
                     lock.unlock(); ready.notify_all();
                     throw_if_cancelled();
                     throw std::runtime_error("model batch queue acquisition timed out");
@@ -436,7 +456,7 @@ struct ModelRegistry::Impl {
                 ready.wait_until(lock, std::min(deadline,
                     std::chrono::steady_clock::now() + std::chrono::milliseconds(20)));
             if (next_admissible() != ticket || cancellation_requested()) {
-                if (adaptive && !cancellation_requested()) ++acquisition_timeout_total;
+                if (!cancellation_requested()) ++acquisition_timeout_total;
                 scalar_queue.erase(std::find_if(scalar_queue.begin(), scalar_queue.end(),
                     [&](const ScalarWaiter& waiter) { return waiter.ticket == ticket; }));
                 lock.unlock(); ready.notify_all();
@@ -447,9 +467,8 @@ struct ModelRegistry::Impl {
                 [&](const ScalarWaiter& waiter) { return waiter.ticket == ticket; });
             if (selected != scalar_queue.begin()) ++scalar_queue.front().bypasses;
             scalar_queue.erase(selected);
-            if (adaptive)
-                queue_wait_ms_total += std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - queued_at).count();
+            queue_wait_ms_total += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - queued_at).count();
             size_t index = available.front(); available.pop_front();
             ++inflight;
             if (adaptive) inflight_tokens += tokens;
@@ -459,18 +478,36 @@ struct ModelRegistry::Impl {
             // Returning a lease is exception safe. No instance is used concurrently.
             struct Lease {
                 Pool& pool; size_t index;
+                bool failed = true, overloaded = false;
+                size_t work = 0;
                 ~Lease() {
                     { std::lock_guard<std::mutex> guard(pool.mutex);
                       pool.available.push_back(index);
-                      if (!pool.adaptive) --pool.inflight; }
+                      if (!pool.adaptive) {
+                          --pool.inflight;
+                          ++pool.completed_total;
+                          if (failed) ++pool.failed_total;
+                          else pool.completed_normalized_work_total += work;
+                          if (overloaded) ++pool.overload_total;
+                          if (!pool.scalar_queue.empty()) ++pool.pressure_total;
+                      } }
                     pool.ready.notify_all();
                 }
             } lease{*this, index};
             if (!adaptive) {
-                throw_if_cancelled();
-                auto response = models[index]->infer(*input, prompt);
-                throw_if_cancelled();
-                return response;
+                try {
+                    throw_if_cancelled();
+                    auto response = models[index]->infer(*input, prompt);
+                    throw_if_cancelled();
+                    lease.work = normalized_work(*input, prompt);
+                    const auto output = models[index]->last_completion_tokens();
+                    if (output) lease.work = lease.work - size_t(expected_output_tokens) + output;
+                    lease.failed = false;
+                    return response;
+                } catch (const HttpStatusError& e) {
+                    lease.overloaded = e.status == 429 || e.status == 503;
+                    throw;
+                }
             }
             const auto start = std::chrono::steady_clock::now();
             bool failed = false, overloaded = false;
