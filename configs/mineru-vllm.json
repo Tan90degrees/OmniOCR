@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "document": {"dpi": 150, "max_pages": 1000, "max_pixels": 40000000, "timeout_seconds": 120},
+  "document": {"dpi": 150, "max_pages": 1000, "timeout_seconds": 120},
   "execution": {"workers": 8, "on_error": "fail"},
   "layout": {
     "provider": "mineru", "model": "mineru", "image_size": [1036, 1036],

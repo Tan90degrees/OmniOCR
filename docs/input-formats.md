@@ -44,6 +44,7 @@ OFD 工具源代码在 `tools/ofd-converter/`，固定 OFDRW 2.3.8，使用 PDFB
     "dpi": 150,
     "max_pages": 1000,
     "max_pixels": 40000000,
+    "image_limits": {"max_width": 12000, "max_height": 12000, "max_pixels": 100000000},
     "timeout_seconds": 120
   }
 }

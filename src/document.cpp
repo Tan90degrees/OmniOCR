@@ -105,9 +105,9 @@ void read_document(const fs::path& input, const Json& settings, const std::funct
     if (!fs::is_regular_file(source)) throw std::runtime_error("input is not a regular file");
     std::string ext = source.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-    uint64_t max_pixels = settings.value("max_pixels", uint64_t(40000000));
+    const uint64_t max_pixels = settings.value("max_pixels", uint64_t(40000000));
     if (std::set<std::string>{".png", ".jpg", ".jpeg", ".bmp", ".ppm", ".pgm", ".tga"}.count(ext)) {
-        checked_consume(1, Image::load(source, max_pixels)); return;
+        checked_consume(1, Image::load(source, image_file_limits(settings))); return;
     }
     if (ext == ".tif" || ext == ".tiff") {
         read_tiff(source, settings, checked_consume); return;

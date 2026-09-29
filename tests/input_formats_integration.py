@@ -132,6 +132,35 @@ def run(binary, external=False, ofd_converter=None):
         _, p = invoke(root/'scan.tif', 'too-many-pixels', 1)
         assert 'max_pixels' in p.stderr
         config['document']['max_pixels'] = 500000
+        # Image-file limits are checked from headers/IFDs before decoding.
+        config['document']['image_limits'] = {'max_width': 32}
+        for path in (root/'relative.png', root/'scan.tif'):
+            _, p = invoke(path, 'too-wide-'+path.suffix[1:], 1)
+            assert 'max_width' in p.stderr, p.stderr
+        config['document']['image_limits'] = {'max_height': 16}
+        for path in (root/'relative.png', root/'scan.tif'):
+            _, p = invoke(path, 'too-tall-'+path.suffix[1:], 1)
+            assert 'max_height' in p.stderr, p.stderr
+        config['document']['image_limits'] = {'max_pixels': 1000}
+        _, p = invoke(root/'scan.tif', 'image-pixel-cap', 1)
+        assert 'max_pixels' in p.stderr, p.stderr
+        config['document']['max_pixels'] = 100
+        config['document']['image_limits'] = {'max_pixels': 2048}
+        for path in (root/'relative.png', root/'scan.tif'):
+            invoke(path, 'image-override-'+path.suffix[1:])
+        config['document'].pop('image_limits')
+        _, p = invoke(root/'relative.png', 'legacy-image-cap', 1)
+        assert 'max_pixels' in p.stderr, p.stderr
+        config['document'].pop('max_pixels')
+        huge = root/'header-only.ppm'
+        huge.write_bytes(b'P6\n10001 10000\n255\n')  # 100,010,000 pixels; no payload needed to reject.
+        _, p = invoke(huge, 'default-image-cap', 1)
+        assert 'max_pixels' in p.stderr, p.stderr
+        config['document']['max_pixels'] = 500000
+        config['document']['image_limits'] = {'max_width': 0}
+        _, p = invoke(root/'relative.png', 'bad-image-limit', 1)
+        assert 'max_width' in p.stderr, p.stderr
+        config['document'].pop('image_limits')
         for ext, key in (('epub','ebook_convert'), ('ofd','ofd_converter')):
             fake = root/('fake.'+ext); fake.write_bytes(b'not a valid document')
             config['document'][key] = '/bin/true'

@@ -7,6 +7,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,10 +16,18 @@ namespace omniocr {
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
 
+struct ImageLimits {
+    uint64_t max_pixels = 100000000;
+    int max_width = std::numeric_limits<int>::max();
+    int max_height = std::numeric_limits<int>::max();
+};
+ImageLimits image_file_limits(const Json& document_settings);
+
 struct Image {
     int width = 0, height = 0;
     std::vector<uint8_t> rgb;
     static Image load(const fs::path&, uint64_t max_pixels);
+    static Image load(const fs::path&, const ImageLimits&);
     Image crop(const std::array<double, 4>&) const;
     Image resize(int w, int h) const;
     Image rotate(int degrees) const;

@@ -8,7 +8,7 @@ void read_tiff(const fs::path& input, const Json& settings,
                const std::function<void(int, const Image&)>& consume) {
     std::unique_ptr<TIFF, decltype(&TIFFClose)> file(TIFFOpen(input.c_str(), "r"), TIFFClose);
     if (!file) throw std::runtime_error("cannot open TIFF");
-    const auto max_pixels = settings.value("max_pixels", uint64_t(40000000));
+    const auto limits = image_file_limits(settings);
     const int max_pages = settings.value("max_pages", 1000);
     int pages = 0;
     // Validate all primary image directories before emitting pages; never truncate.
@@ -17,8 +17,11 @@ void read_tiff(const fs::path& input, const Json& settings,
         uint32_t w = 0, h = 0;
         if (!TIFFGetField(file.get(), TIFFTAG_IMAGEWIDTH, &w) ||
             !TIFFGetField(file.get(), TIFFTAG_IMAGELENGTH, &h) || !w || !h ||
-            uint64_t(w) * h > max_pixels || w > INT32_MAX || h > INT32_MAX)
-            throw std::runtime_error("invalid TIFF dimensions or image exceeds max_pixels");
+            w > INT32_MAX || h > INT32_MAX)
+            throw std::runtime_error("invalid TIFF dimensions");
+        if (uint64_t(w) * h > limits.max_pixels) throw std::runtime_error("TIFF image exceeds max_pixels");
+        if (w > uint32_t(limits.max_width)) throw std::runtime_error("TIFF image exceeds max_width");
+        if (h > uint32_t(limits.max_height)) throw std::runtime_error("TIFF image exceeds max_height");
         if (TIFFLastDirectory(file.get())) break;
         if (!TIFFReadDirectory(file.get())) throw std::runtime_error("invalid TIFF page directory");
     }
