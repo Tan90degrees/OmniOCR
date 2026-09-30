@@ -132,7 +132,7 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
 
 ### vLLM 视觉 token 分桶投递（可选）
 
-离线 BOX OCR 可在单个 vLLM 模型（v2 为 `executors.<id>`）启用 `vllm_visual_scheduler`。模型池收集来自不同文件、页面和 BOX 类型的请求，按**预处理后**的图片尺寸估算视觉 token，依据配置的边界分桶；在短等待窗口内优先选取同桶请求，使一波请求的估计 prefill 尽量填满服务端每轮 token 预算，并参考 CUDA graph 的 capture size 挑选投递波次。每个 BOX 仍是独立的 Chat Completions 请求，服务端负责连续批处理。不要设置框架 `batch_size>1`；此策略与 `adaptive_concurrency` 互斥。
+离线 BOX OCR 可在单个 vLLM 模型（v2 为 `executors.<id>`）启用 `vllm_visual_scheduler`。模型池收集来自不同文件、页面和 BOX 类型的请求，按**预处理后**的图片尺寸估算视觉 token。默认 `bucket_mode: adaptive`：每次投递前，按待处理 BOX 的估算成本排序，参考可容纳的 CUDA graph capture size 把它们划成**接近等数量**的临时桶；即使所有请求都落在旧的第 0 桶，也能继续细分。每个 BOX 仍是独立的 Chat Completions 请求，服务端负责连续批处理。不要设置框架 `batch_size>1`；此策略与 `adaptive_concurrency` 互斥。
 
 ```json
 "ocr": {
@@ -147,7 +147,8 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
     "visual_pixels_per_token": 784,
     "visual_token_overhead": 0, "max_visual_tokens": 4096,
     "prompt_token_overhead": 64, "expected_output_tokens": 512,
-    "bucket_edges": [256, 512, 1024, 2048], "max_wait_ms": 2
+    "bucket_mode": "adaptive", "bucket_scan_limit": 256,
+    "max_bucket_bypasses": 4, "max_wait_ms": 2
   }
 }
 ```
@@ -155,14 +156,16 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
 | 配置 | 用途 |
 |---|---|
 | `visual_pixels_per_token` / `visual_token_overhead` / `max_visual_tokens` | 模型专属估算：`visual = min(max_visual_tokens, visual_token_overhead + ceil(resized_width × resized_height / visual_pixels_per_token))`；按模型的 patch、动态分辨率、crop/tiling 规则实测后填写；上例仅为演示。 |
-| `bucket_edges` | 严格递增的视觉 token 上界，`upper_bound` 分桶；可按实际 BOX 面积分位数设置。 |
+| `bucket_mode` / `bucket_edges` | 默认 `adaptive`，按当前队列分位动态形成临时桶，`bucket_edges` 可省略；`static` 则沿用严格递增的视觉 token 边界并要求填写 `bucket_edges`。 |
+| `bucket_scan_limit` | 动态分桶最多检查队首多少个请求，默认 256，范围 1–4096；限制每次排序的开销。队首始终在扫描范围内。 |
+| `max_bucket_bypasses` | 默认 4，范围 0–128；队首因选择其他桶被越过达到次数后，下一波先处理队首。排队时间达到 `acquire_timeout_ms / 2` 时也优先处理它。设 0 则始终优先队首。 |
 | `max_model_len` | 根据 `prompt_token_overhead + ceil(prompt字节数/4) + visual + expected_output_tokens` 估算单请求长度；超出即拒绝。文本 token 估算是近似值，服务端还须正确配置截断和输入上限。 |
 | `max_num_seqs` | 服务端配置快照，限制本模型池同时发起的调用数；还受 `max_concurrent_requests` 限制。若多个模型 ID 共用一个 vLLM 服务，须合并规划各自上限。 |
 | `max_num_batched_tokens` | **每波新投递请求**估计 prefill 的软预算；单个超预算请求可独占这一波，交由 vLLM 处理分块 prefill。它不是所有在途 prompt 与输出 token 之和的硬上限。 |
-| `cudagraph_capture_sizes` | 手动填写服务端已启用的升序 capture size；选不超过当前空闲槽和排队请求数的最大 size，若都不满足则选 1。它只决定一波的投递目标，**不保证** vLLM 实际形成相同的图批次。 |
+| `cudagraph_capture_sizes` | 手动填写服务端已启用的升序 capture size。动态模式从已排队请求中寻找估算 prefill 能放进 `max_num_batched_tokens` 的最大 capture size，作为每桶目标请求数；当即空闲槽少于目标数时只投递可用的数量。它不保证 vLLM 实际形成相同的图批次。 |
 | `max_wait_ms` | 低负载下最多等待这么久凑候选请求，默认 2 ms，范围 0–1000，必须小于 `acquire_timeout_ms`；队首到时优先服务以免某桶长期饥饿。 |
 
-`GET /v1/metrics` 中可对照 `strategy=visual_bucket`、`visual_bucket_dispatched`（按桶计数）、`visual_waves_total`、`visual_wave_requests_total`、`visual_wave_prefill_tokens_total`、`queued`、`inflight` 与 `queue_wait_ms_total`。波次指标为**投递计划数**，请求失败或取消时可能不同于成功数。建议先用代表性的大小和输出长度分布，固定 `max_concurrent_requests` 做扫描，再交替 A/B 对比 `docs/min`、成功率、vLLM Running/Waiting、图像缓存命中与 p95 排队时间；这是启发式调度，无法仅由静态配置推算全局最优吞吐。`box_workers`、页面与文档 worker 必须能持续提供请求。
+`GET /v1/metrics` 包含 `visual_bucket_mode`、`visual_selected_capture_size`（最近一次规划的目标形状）、`visual_dynamic_bucket_ranges` 和 `visual_dynamic_bucket_sizes`（最近扫描窗口的临时桶区间和数量）、`visual_dynamic_bucket_dispatched`（累计按临时桶**相对序号**计数）、`visual_dynamic_splits_total`、`visual_bucket_fairness_forced_total`、`visual_waves_total`、`visual_wave_requests_total`、`queued`、`inflight` 与 `queue_wait_ms_total`。临时桶边界每波可变化，累计序号不代表固定的 token 区间。`visual_bucket_dispatched` 仍按手填的静态 `bucket_edges` 统计；未配置边界时只有一项，不要用它判断动态分桶是否生效。波次指标为**投递计划数**，请求失败或取消时可能不同于成功数。建议先用代表性的大小和输出长度分布，固定 `max_concurrent_requests` 做扫描，再交替 A/B 对比 `docs/min`、成功率、vLLM Running/Waiting、图像缓存命中与 p95 排队时间；这是启发式调度，无法仅由静态配置推算全局最优吞吐。`box_workers`、页面与文档 worker 必须能持续提供请求。
 
 vLLM 参数需按实际服务版本核对：[调度器配置](https://docs.vllm.ai/en/latest/api/vllm/config/scheduler/)把 `max_num_batched_tokens` 定义为调度轮次 token 预算，`max_num_seqs` 控制序列容量；[CUDA graph 配置](https://docs.vllm.ai/en/latest/api/vllm/config/vllm/)中的 capture sizes 是图形状。框架只使用手动快照，不自动修改或抓取服务端配置。
 

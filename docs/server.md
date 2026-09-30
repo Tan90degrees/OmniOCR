@@ -118,7 +118,7 @@ curl -X DELETE -H "Authorization: Bearer $OCR_API_KEY" \
 
 `models.<id>` 下的 `inflight` 按正在执行的 BOX 请求计数，原生组批时一批内的每个 BOX 都计入；`completed_total` 为完成的 BOX 请求数（含失败），`failed_total` 为其中失败数，`overload_total` 为收到后端 429/503 的请求数。固定与自适应模式都更新这些基本指标；等待实例超时的请求计入 `acquisition_timeout_total`，不会计入已完成的推理请求。自适应控制专用的 `window_*` 指标在固定模式下不更新。
 
-启用 [vLLM 视觉 token 分桶调度](configuration.md#vllm-视觉-token-分桶投递可选) 后，可查看 `visual_bucket_dispatched`、`visual_waves_total`、`visual_wave_requests_total`、`inflight_visual_tokens` 与 `peak_inflight_visual_tokens`。这些是客户端估算和投递指标，不能替代服务端的实际连续批处理与缓存指标。
+启用 [vLLM 视觉 token 分桶调度](configuration.md#vllm-视觉-token-分桶投递可选) 后，可查看 `visual_bucket_mode`、最近的 `visual_dynamic_bucket_ranges` / `visual_dynamic_bucket_sizes`、累计的 `visual_dynamic_bucket_dispatched`、`visual_selected_capture_size`、`visual_waves_total`、`visual_wave_requests_total`、`inflight_visual_tokens` 与 `peak_inflight_visual_tokens`。`visual_bucket_dispatched` 只统计静态边界，动态模式下应看临时桶指标。这些是客户端估算和投递指标，不能替代服务端的实际连续批处理与缓存指标。
 
 ## 调度和部署边界
 

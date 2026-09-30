@@ -1,6 +1,7 @@
 #include "omniocr/tensor.hpp"
 #include "omniocr/plugins.hpp"
 #include "../src/backends/http_client.hpp"
+#include "../src/visual_buckets.hpp"
 #include <algorithm>
 #include <mutex>
 #include <atomic>
@@ -398,6 +399,31 @@ void cancellation_pool_test() {
            "model lease unavailable after cancellation");
 }
 void visual_bucket_scheduler_test() {
+    std::vector<detail::VisualCandidate> skewed;
+    for (size_t visual = 1; visual <= 16; ++visual)
+        skewed.push_back({visual, visual, 20 + visual});
+    const auto dense = detail::partition_visual_buckets(skewed, {1, 2, 4, 8}, 8, 320);
+    expect(dense.capture_size == 8 && dense.groups.size() == 2 &&
+           dense.groups[0].front().visual == 1 && dense.groups[0].back().visual == 8 &&
+           dense.groups[1].front().visual == 9 && dense.groups[1].back().visual == 16,
+           "skewed visual costs were not split into capture-sized quantile buckets");
+    const auto tight = detail::partition_visual_buckets(skewed, {1, 2, 4, 8}, 8, 110);
+    expect(tight.capture_size == 4 && tight.groups.size() == 5 &&
+           tight.groups[2].size() == 4 && tight.groups[2].front().visual == 6 &&
+           tight.groups[2].back().visual == 9,
+           "prefill limit did not refine adaptive bucket granularity");
+    std::vector<detail::VisualCandidate> offset;
+    for (size_t visual = 1; visual <= 9; ++visual)
+        offset.push_back({visual, visual, visual == 1 ? 80u : 10u});
+    const auto aligned = detail::partition_visual_buckets(offset, {1, 2, 4}, 4, 40);
+    expect(aligned.capture_size == 4 && aligned.groups.size() == 3 &&
+           aligned.groups[0].size() == 1 && aligned.groups[1].size() == 4 &&
+           aligned.groups[1].front().visual == 2 && aligned.groups[1].back().visual == 5,
+           "adaptive buckets missed a feasible capture-sized window between quantile cuts");
+    const auto singleton = detail::partition_visual_buckets({{0, 10, 1000}, {1, 20, 1000}},
+        {1, 2}, 2, 100);
+    expect(singleton.capture_size == 1 && singleton.groups.size() == 2,
+           "oversized requests should be admitted singly");
     auto settings = config();
     settings["models"]["shared"] = {{"backend", "vllm"},
         {"endpoint", "http://127.0.0.1:1/v1/chat/completions"}, {"model", "fixture"},
@@ -436,10 +462,17 @@ void visual_bucket_scheduler_test() {
     for (int i = 0; i < 18; ++i)
         expect(results[i].get().at("text") == std::to_string(i), "visual wave misrouted result");
     const auto metrics = registry.scheduler_metrics().at("shared");
+    uint64_t dynamic_dispatched = 0;
+    for (const auto& count : metrics.at("visual_dynamic_bucket_dispatched"))
+        dynamic_dispatched += count.get<uint64_t>();
     expect(state.peak == 2 && metrics.at("strategy") == "visual_bucket" &&
+           metrics.at("visual_bucket_mode") == "adaptive" &&
            metrics.at("completed_total") == 18 && metrics.at("inflight") == 0 &&
            metrics.at("visual_wave_requests_total") == 18 &&
            metrics.at("visual_waves_total") > 0 &&
+           metrics.at("visual_dynamic_splits_total") > 0 &&
+           dynamic_dispatched == 18 &&
+           metrics.at("visual_selected_capture_size") >= 1 &&
            metrics.at("visual_bucket_dispatched")[0] == 6 &&
            metrics.at("visual_bucket_dispatched")[1] == 6 &&
            metrics.at("visual_bucket_dispatched")[2] == 6,
@@ -462,6 +495,27 @@ void visual_bucket_scheduler_test() {
     bad = settings;
     bad["models"]["shared"]["vllm_visual_scheduler"]["max_num_seqs"] = 0;
     throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["vllm_visual_scheduler"]["bucket_mode"] = "unknown";
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["vllm_visual_scheduler"]["bucket_scan_limit"] = 0;
+    throws([&] { validate_config(bad); });
+    auto no_edges = settings;
+    no_edges["models"]["shared"]["vllm_visual_scheduler"].erase("bucket_edges");
+    validate_config(no_edges);
+    no_edges["models"]["shared"]["vllm_visual_scheduler"]["bucket_mode"] = "static";
+    throws([&] { validate_config(no_edges); });
+    no_edges["models"]["shared"]["vllm_visual_scheduler"]["bucket_edges"] = Json::array({10, 50});
+    validate_config(no_edges);
+    ModelRegistry legacy(no_edges.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<Probe>(state);
+    });
+    Image legacy_image{10, 10, {}};
+    expect(legacy.infer("shared", legacy_image, "legacy")["text"] == "legacy" &&
+           legacy.scheduler_metrics()["shared"]["visual_bucket_mode"] == "static" &&
+           legacy.scheduler_metrics()["shared"]["visual_dynamic_splits_total"] == 0,
+           "static visual bucket configuration regressed");
     settings["models"]["shared"]["vllm_visual_scheduler"]["max_num_seqs"] = 1;
     settings["models"]["shared"]["vllm_visual_scheduler"]["cudagraph_capture_sizes"] = Json::array({1});
     std::promise<void> entered, release;
