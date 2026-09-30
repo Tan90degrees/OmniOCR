@@ -185,7 +185,8 @@ void validate_config(const Json& c) {
             const std::set<std::string> fields = {"enabled", "max_num_seqs", "max_model_len",
                 "max_num_batched_tokens", "cudagraph_capture_sizes", "visual_pixels_per_token",
                 "visual_token_overhead", "max_visual_tokens", "prompt_token_overhead",
-                "expected_output_tokens", "bucket_edges", "max_wait_ms"};
+                "expected_output_tokens", "bucket_edges", "max_wait_ms",
+                "bucket_mode", "bucket_scan_limit", "max_bucket_bypasses"};
             for (const auto& [key, value] : s.items())
                 require(fields.count(key) != 0, "unknown vllm_visual_scheduler setting: " + key);
             if (s.contains("enabled")) require(s.at("enabled").is_boolean(),
@@ -199,8 +200,17 @@ void validate_config(const Json& c) {
             bounded(s, "prompt_token_overhead", 0, 1000000000);
             bounded(s, "expected_output_tokens", 1, 1000000000);
             bounded(s, "max_wait_ms", 0, 1000);
+            bounded(s, "bucket_scan_limit", 1, 4096);
+            bounded(s, "max_bucket_bypasses", 0, 128);
+            if (s.contains("bucket_mode"))
+                require(s.at("bucket_mode").is_string() &&
+                    (s.at("bucket_mode") == "adaptive" || s.at("bucket_mode") == "static"),
+                    "bucket_mode must be adaptive or static");
             for (const char* field : {"bucket_edges", "cudagraph_capture_sizes"}) {
-                if (!s.contains(field) && !s.value("enabled", false)) continue;
+                const bool required = s.value("enabled", false) &&
+                    (std::string(field) == "cudagraph_capture_sizes" ||
+                     s.value("bucket_mode", std::string("adaptive")) == "static");
+                if (!s.contains(field) && !required) continue;
                 require(s.contains(field) && s.at(field).is_array() &&
                     (std::string(field) != "bucket_edges" || !s.at(field).empty()) &&
                     s.at(field).size() <= 128, std::string(field) + " must be an array of at most 128 integers (bucket_edges nonempty)");

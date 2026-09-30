@@ -88,7 +88,7 @@ def run(binary, visual=False):
                         **({'vllm_visual_scheduler': {'enabled': True, 'max_num_seqs': 4,
                             'max_model_len': 8192, 'max_num_batched_tokens': 4096,
                             'cudagraph_capture_sizes': [1, 2, 4],
-                            'visual_pixels_per_token': 16, 'bucket_edges': [32, 128],
+                            'visual_pixels_per_token': 16, 'bucket_mode': 'adaptive',
                             'max_wait_ms': 2}} if visual else
                           {'adaptive_concurrency': {'enabled': True, 'initial_concurrency': 1,
                             'window_ms': 100, 'min_samples': 2, 'token_budget': 10000}})}},
@@ -114,6 +114,9 @@ def run(binary, visual=False):
                     if visual:
                         assert model['strategy'] == 'visual_bucket' and model['concurrency_limit'] == 4, model
                         assert sum(model['visual_bucket_dispatched']) == 20, model
+                        assert model['visual_bucket_mode'] == 'adaptive' and len(model['visual_bucket_dispatched']) == 1, model
+                        assert model['visual_dynamic_splits_total'] > 0, model
+                        assert sum(model['visual_dynamic_bucket_dispatched']) == 20, model
                         assert model['visual_waves_total'] > 0 and model['peak_inflight_visual_tokens'] > 0, model
                     else:
                         assert model['strategy'] == 'adaptive' and 2 <= model['concurrency_limit'] <= 4, model

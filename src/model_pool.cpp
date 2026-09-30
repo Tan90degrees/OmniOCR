@@ -1,5 +1,6 @@
 #include "omniocr/core.hpp"
 #include "backends/http_client.hpp"
+#include "visual_buckets.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -34,7 +35,7 @@ struct ModelRegistry::Impl {
         std::deque<std::shared_ptr<Request>> queue;
         struct ScalarWaiter {
             uint64_t ticket; size_t tokens; int bypasses = 0;
-            size_t visual = 0, prefill = 0, bucket = 0;
+            size_t visual = 0, prefill = 0, bucket = 0, dynamic_bucket = 0;
             std::chrono::steady_clock::time_point queued_at{};
         };
         std::deque<ScalarWaiter> scalar_queue;
@@ -45,11 +46,20 @@ struct ModelRegistry::Impl {
         int visual_cap = 1000000, prompt_overhead = 64, visual_output_tokens = 512;
         int server_max_seqs = 1, server_model_len = 8192, server_batched_tokens = 8192;
         int visual_wait_ms = 2;
+        bool dynamic_visual_buckets = true;
+        size_t bucket_scan_limit = 256;
+        int max_bucket_bypasses = 4;
         std::vector<size_t> bucket_edges;
         std::vector<int> capture_sizes;
         std::deque<uint64_t> dispatch_wave;
         uint64_t waves_total = 0, wave_requests_total = 0, wave_prefill_total = 0;
         std::vector<uint64_t> bucket_dispatched;
+        uint64_t visual_dynamic_splits_total = 0;
+        uint64_t visual_bucket_fairness_forced_total = 0;
+        size_t visual_selected_capture_size = 0;
+        std::vector<std::array<size_t, 2>> visual_dynamic_bucket_ranges;
+        std::vector<size_t> visual_dynamic_bucket_sizes;
+        std::vector<uint64_t> visual_dynamic_bucket_dispatched;
         size_t inflight_visual_tokens = 0, peak_inflight_visual_tokens = 0;
         uint64_t next_ticket = 0;
         std::vector<std::thread> workers;
@@ -173,35 +183,19 @@ struct ModelRegistry::Impl {
                 inflight >= size_t(server_max_seqs)) return;
             const size_t capacity = std::min({available.size(), scalar_queue.size(),
                 size_t(server_max_seqs) - inflight});
-            size_t target = capacity;
-            if (!capture_sizes.empty()) {
-                target = 0;
-                for (int size : capture_sizes)
-                    if (size <= int(capacity)) target = size;
-                if (!target) target = 1;
-            }
             const auto now = std::chrono::steady_clock::now();
-            const auto oldest = std::min_element(scalar_queue.begin(), scalar_queue.end(),
-                [](const auto& a, const auto& b) { return a.queued_at < b.queued_at; });
+            // Waiters enter under the pool mutex, so queue order is arrival order.
+            const auto oldest = scalar_queue.begin();
             if (visual_wait_ms && scalar_queue.size() < std::min(available.size(),
                 size_t(server_max_seqs) - inflight) &&
                 now - oldest->queued_at < std::chrono::milliseconds(visual_wait_ms)) return;
-            size_t chosen = oldest->bucket;
-            if (now - oldest->queued_at < std::chrono::milliseconds(visual_wait_ms)) {
-                size_t best_count = 0, best_work = 0;
-                for (size_t b = 0; b <= bucket_edges.size(); ++b) {
-                    size_t count = 0, work = 0;
-                    for (const auto& waiter : scalar_queue)
-                        if (waiter.bucket == b && count < target &&
-                            (!count || work + waiter.prefill <= size_t(server_batched_tokens))) {
-                            ++count; work += waiter.prefill;
-                        }
-                    if (count > best_count || (count == best_count && work > best_work)) {
-                        best_count = count; best_work = work; chosen = b;
-                    }
-                }
-            }
             size_t work = 0;
+            size_t target = capacity;
+            if (!dynamic_visual_buckets && !capture_sizes.empty()) {
+                target = 1;
+                for (int size : capture_sizes)
+                    if (size <= int(capacity)) target = size;
+            }
             auto append = [&](const ScalarWaiter& waiter) {
                 if (dispatch_wave.size() >= target) return;
                 if (!dispatch_wave.empty() &&
@@ -210,10 +204,94 @@ struct ModelRegistry::Impl {
                 dispatch_wave.push_back(waiter.ticket);
                 work += waiter.prefill;
             };
-            for (const auto& waiter : scalar_queue)
-                if (waiter.bucket == chosen) append(waiter);
-            for (const auto& waiter : scalar_queue)
-                if (waiter.bucket != chosen) append(waiter);
+            if (dynamic_visual_buckets) {
+                std::vector<detail::VisualCandidate> pending;
+                pending.reserve(std::min(scalar_queue.size(), bucket_scan_limit));
+                for (const auto& waiter : scalar_queue) {
+                    if (pending.size() == bucket_scan_limit) break;
+                    pending.push_back({waiter.ticket, waiter.visual, waiter.prefill});
+                }
+                const size_t shape_capacity = std::min({size_t(max_concurrent),
+                    size_t(server_max_seqs), pending.size()});
+                auto buckets = detail::partition_visual_buckets(std::move(pending),
+                    capture_sizes, shape_capacity, size_t(server_batched_tokens));
+                target = std::min(capacity, buckets.capture_size);
+                visual_selected_capture_size = buckets.capture_size;
+                visual_dynamic_bucket_ranges.clear();
+                visual_dynamic_bucket_sizes.clear();
+                for (size_t b = 0; b < buckets.groups.size(); ++b) {
+                    const auto& group = buckets.groups[b];
+                    visual_dynamic_bucket_ranges.push_back({group.front().visual, group.back().visual});
+                    visual_dynamic_bucket_sizes.push_back(group.size());
+                    for (const auto& candidate : group) {
+                        auto it = std::lower_bound(scalar_queue.begin(), scalar_queue.end(),
+                            candidate.ticket, [](const auto& waiter, uint64_t ticket) {
+                                return waiter.ticket < ticket;
+                            });
+                        if (it != scalar_queue.end() && it->ticket == candidate.ticket)
+                            it->dynamic_bucket = b;
+                    }
+                }
+                if (buckets.groups.size() > 1) ++visual_dynamic_splits_total;
+                const bool aged = oldest->bypasses >= max_bucket_bypasses ||
+                    now - oldest->queued_at >= std::chrono::milliseconds(timeout_ms / 2);
+                if (aged) ++visual_bucket_fairness_forced_total;
+                size_t chosen = 0, best_count = 0, best_work = 0;
+                for (size_t b = 0; b < buckets.groups.size(); ++b) {
+                    if (aged && std::any_of(buckets.groups[b].begin(), buckets.groups[b].end(),
+                        [&](const auto& candidate) { return candidate.ticket == oldest->ticket; })) {
+                        chosen = b;
+                        break;
+                    }
+                    size_t count = 0, estimate = 0;
+                    for (const auto& candidate : buckets.groups[b]) {
+                        if (count && (candidate.prefill > size_t(server_batched_tokens) ||
+                            estimate > size_t(server_batched_tokens) - candidate.prefill)) continue;
+                        ++count;
+                        estimate += candidate.prefill;
+                    }
+                    if (count > best_count || (count == best_count && estimate > best_work)) {
+                        chosen = b; best_count = count; best_work = estimate;
+                    }
+                }
+                // Once the oldest reaches its deadline, place it first even
+                // when another candidate in the same quantile is smaller.
+                if (aged) append(*oldest);
+                for (const auto& candidate : buckets.groups[chosen]) {
+                    const auto it = std::lower_bound(scalar_queue.begin(), scalar_queue.end(),
+                        candidate.ticket, [](const auto& waiter, uint64_t ticket) {
+                            return waiter.ticket < ticket;
+                        });
+                    if (it != scalar_queue.end() && it->ticket == candidate.ticket &&
+                        (!aged || it->ticket != oldest->ticket)) append(*it);
+                }
+                size_t scanned = 0;
+                for (const auto& waiter : scalar_queue) {
+                    if (scanned++ == bucket_scan_limit) break;
+                    if (std::find(dispatch_wave.begin(), dispatch_wave.end(), waiter.ticket) == dispatch_wave.end())
+                        append(waiter);
+                }
+            } else {
+                size_t chosen = oldest->bucket;
+                if (now - oldest->queued_at < std::chrono::milliseconds(visual_wait_ms)) {
+                    size_t best_count = 0, best_work = 0;
+                    for (size_t b = 0; b <= bucket_edges.size(); ++b) {
+                        size_t count = 0, estimate = 0;
+                        for (const auto& waiter : scalar_queue)
+                            if (waiter.bucket == b && count < target &&
+                                (!count || estimate + waiter.prefill <= size_t(server_batched_tokens))) {
+                                ++count; estimate += waiter.prefill;
+                            }
+                        if (count > best_count || (count == best_count && estimate > best_work)) {
+                            best_count = count; best_work = estimate; chosen = b;
+                        }
+                    }
+                }
+                for (const auto& waiter : scalar_queue)
+                    if (waiter.bucket == chosen) append(waiter);
+                for (const auto& waiter : scalar_queue)
+                    if (waiter.bucket != chosen) append(waiter);
+            }
             if (!dispatch_wave.empty()) {
                 ++waves_total;
                 wave_requests_total += dispatch_wave.size();
@@ -409,6 +487,14 @@ struct ModelRegistry::Impl {
                     {"visual_wave_requests_total", wave_requests_total},
                     {"visual_wave_prefill_tokens_total", wave_prefill_total},
                     {"visual_bucket_dispatched", bucket_dispatched},
+                    {"visual_bucket_mode", visual_scheduler ?
+                        (dynamic_visual_buckets ? "adaptive" : "static") : "off"},
+                    {"visual_selected_capture_size", visual_selected_capture_size},
+                    {"visual_dynamic_splits_total", visual_dynamic_splits_total},
+                    {"visual_bucket_fairness_forced_total", visual_bucket_fairness_forced_total},
+                    {"visual_dynamic_bucket_ranges", visual_dynamic_bucket_ranges},
+                    {"visual_dynamic_bucket_sizes", visual_dynamic_bucket_sizes},
+                    {"visual_dynamic_bucket_dispatched", visual_dynamic_bucket_dispatched},
                     {"inflight_visual_tokens", inflight_visual_tokens},
                     {"peak_inflight_visual_tokens", peak_inflight_visual_tokens}};
         }
@@ -558,9 +644,8 @@ struct ModelRegistry::Impl {
                     std::chrono::steady_clock::now() + std::chrono::milliseconds(20));
                 if (visual_scheduler && !scalar_queue.empty() && available.size() &&
                     inflight < size_t(server_max_seqs) && dispatch_wave.empty()) {
-                    const auto oldest = std::min_element(scalar_queue.begin(), scalar_queue.end(),
-                        [](const auto& a, const auto& b) { return a.queued_at < b.queued_at; });
-                    wake = std::min(wake, oldest->queued_at + std::chrono::milliseconds(visual_wait_ms));
+                    wake = std::min(wake, scalar_queue.front().queued_at +
+                        std::chrono::milliseconds(visual_wait_ms));
                 }
                 ready.wait_until(lock, wake);
             }
@@ -578,6 +663,12 @@ struct ModelRegistry::Impl {
             if (visual_scheduler) {
                 dispatch_wave.pop_front();
                 ++bucket_dispatched[selected->bucket];
+                if (dynamic_visual_buckets) {
+                    if (visual_dynamic_bucket_dispatched.size() <= selected->dynamic_bucket)
+                        visual_dynamic_bucket_dispatched.resize(selected->dynamic_bucket + 1);
+                    ++visual_dynamic_bucket_dispatched[selected->dynamic_bucket];
+                    if (selected != scalar_queue.begin()) ++scalar_queue.front().bypasses;
+                }
             } else if (selected != scalar_queue.begin()) ++scalar_queue.front().bypasses;
             scalar_queue.erase(selected);
             queue_wait_ms_total += std::chrono::duration<double, std::milli>(
@@ -759,14 +850,23 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
                 pool->visual_output_tokens = s.value("expected_output_tokens", 512);
                 pool->expected_output_tokens = pool->visual_output_tokens;
                 pool->visual_wait_ms = s.value("max_wait_ms", 2);
-                pool->bucket_edges = s.at("bucket_edges").get<std::vector<size_t>>();
+                pool->dynamic_visual_buckets = s.value("bucket_mode", std::string("adaptive")) == "adaptive";
+                pool->bucket_scan_limit = s.value("bucket_scan_limit", 256);
+                pool->max_bucket_bypasses = s.value("max_bucket_bypasses", 4);
+                if (s.contains("bucket_edges"))
+                    pool->bucket_edges = s.at("bucket_edges").get<std::vector<size_t>>();
                 pool->capture_sizes = s.at("cudagraph_capture_sizes").get<std::vector<int>>();
                 pool->bucket_dispatched.resize(pool->bucket_edges.size() + 1);
                 if (pool->server_max_seqs < 1 || pool->server_model_len < 1 ||
                     pool->server_batched_tokens < 1 || pool->visual_pixels_per_token < 1 ||
                     pool->visual_cap < 1 || pool->visual_overhead < 0 || pool->prompt_overhead < 0 ||
                     pool->visual_output_tokens < 1 || pool->visual_wait_ms < 0 ||
-                    pool->visual_wait_ms >= pool->timeout_ms)
+                    pool->visual_wait_ms >= pool->timeout_ms || pool->bucket_scan_limit < 1 ||
+                    pool->bucket_scan_limit > 4096 || pool->max_bucket_bypasses < 0 ||
+                    pool->max_bucket_bypasses > 128 ||
+                    (s.value("bucket_mode", std::string("adaptive")) != "adaptive" &&
+                     s.value("bucket_mode", std::string("adaptive")) != "static") ||
+                    (!pool->dynamic_visual_buckets && pool->bucket_edges.empty()))
                     throw std::runtime_error("invalid visual scheduler settings: " + id);
             }
         }
