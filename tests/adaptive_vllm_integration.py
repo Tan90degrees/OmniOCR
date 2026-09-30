@@ -54,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(500)
 
 
-def run(binary):
+def run(binary, visual=False):
     backend = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     backend.daemon_threads = True
     backend.lock = threading.Lock()
@@ -85,8 +85,13 @@ def run(binary):
                     'ocr': {'backend': 'vllm', 'instances': 1,
                         'max_concurrent_requests': 4, 'model': 'fixture',
                         'endpoint': f'http://127.0.0.1:{backend.server_port}/v1/chat/completions',
-                        'adaptive_concurrency': {'enabled': True, 'initial_concurrency': 1,
-                            'window_ms': 100, 'min_samples': 2, 'token_budget': 10000}}},
+                        **({'vllm_visual_scheduler': {'enabled': True, 'max_num_seqs': 4,
+                            'max_model_len': 8192, 'max_num_batched_tokens': 4096,
+                            'cudagraph_capture_sizes': [1, 2, 4],
+                            'visual_pixels_per_token': 16, 'bucket_edges': [32, 128],
+                            'max_wait_ms': 2}} if visual else
+                          {'adaptive_concurrency': {'enabled': True, 'initial_concurrency': 1,
+                            'window_ms': 100, 'min_samples': 2, 'token_budget': 10000}})}},
                 'routes': {label: {'model': 'ocr', 'prompt': label} for label in labels},
                 'server': {'port': port, 'data_dir': str(root / 'state'),
                            'allowed_input_root': str(root), 'max_jobs': 1}}
@@ -106,11 +111,17 @@ def run(binary):
                     code, stats = request(base, '/v1/metrics')
                     assert code == 200, (code, stats)
                     model = stats['models']['ocr']
-                    assert model['strategy'] == 'adaptive' and 2 <= model['concurrency_limit'] <= 4, model
+                    if visual:
+                        assert model['strategy'] == 'visual_bucket' and model['concurrency_limit'] == 4, model
+                        assert sum(model['visual_bucket_dispatched']) == 20, model
+                        assert model['visual_waves_total'] > 0 and model['peak_inflight_visual_tokens'] > 0, model
+                    else:
+                        assert model['strategy'] == 'adaptive' and 2 <= model['concurrency_limit'] <= 4, model
                     assert model['completed_total'] == 20 and model['inflight'] == 0, model
                     assert 20 * 42 < model['completed_normalized_work_total'] < 20 * 512, model
-                    assert 0 < model['current_token_budget'] <= model['token_budget'], model
-                    assert 0.5 <= model['token_estimate_scale'] < 1.0, model
+                    if not visual:
+                        assert 0 < model['current_token_budget'] <= model['token_budget'], model
+                        assert 0.5 <= model['token_estimate_scale'] < 1.0, model
                     assert sorted(backend.calls) == sorted(labels) and backend.widths == {40, 80, 120, 160}
                     assert 2 <= backend.peak <= 4
                     assert not backend.errors, backend.errors
@@ -120,8 +131,9 @@ def run(binary):
                     except subprocess.TimeoutExpired: proc.kill(); proc.wait()
     finally:
         backend.shutdown(); backend.server_close(); thread.join()
-    print('PASS: adaptive vLLM requests, usage feedback and REST metrics')
+    print('PASS: ' + ('visual bucket' if visual else 'adaptive') + ' vLLM requests and REST metrics')
 
 
 if __name__ == '__main__':
     run(str(Path(sys.argv[1]).resolve()))
+    run(str(Path(sys.argv[1]).resolve()), visual=True)

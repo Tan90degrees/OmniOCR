@@ -397,6 +397,113 @@ void cancellation_pool_test() {
     expect(registry.infer("m", sample, "recovered")["text"] == "recovered",
            "model lease unavailable after cancellation");
 }
+void visual_bucket_scheduler_test() {
+    auto settings = config();
+    settings["models"]["shared"] = {{"backend", "vllm"},
+        {"endpoint", "http://127.0.0.1:1/v1/chat/completions"}, {"model", "fixture"},
+        {"instances", 1}, {"max_concurrent_requests", 4}, {"acquire_timeout_ms", 5000},
+        {"vllm_visual_scheduler", {{"enabled", true}, {"max_num_seqs", 2},
+            {"max_model_len", 1000}, {"max_num_batched_tokens", 300},
+            {"cudagraph_capture_sizes", Json::array({1, 2})},
+            {"visual_pixels_per_token", 10}, {"visual_token_overhead", 2},
+            {"max_visual_tokens", 500}, {"prompt_token_overhead", 3},
+            {"expected_output_tokens", 10}, {"bucket_edges", Json::array({10, 50})},
+            {"max_wait_ms", 2}}}};
+    validate_config(settings);
+    struct State { std::atomic<int> active{0}, peak{0}; } state;
+    struct Probe : Model {
+        State& state;
+        explicit Probe(State& s) : state(s) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            const int active = ++state.active;
+            int previous = state.peak;
+            while (previous < active && !state.peak.compare_exchange_weak(previous, active)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(12));
+            --state.active;
+            return {{"text", prompt}};
+        }
+    };
+    ModelRegistry registry(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<Probe>(state);
+    });
+    std::vector<std::future<Json>> results;
+    for (int i = 0; i < 18; ++i)
+        results.push_back(std::async(std::launch::async, [&, i] {
+            const int edge = i % 3 == 0 ? 5 : i % 3 == 1 ? 15 : 30;
+            Image sample{edge, edge, {}};
+            return registry.infer("shared", sample, std::to_string(i));
+        }));
+    for (int i = 0; i < 18; ++i)
+        expect(results[i].get().at("text") == std::to_string(i), "visual wave misrouted result");
+    const auto metrics = registry.scheduler_metrics().at("shared");
+    expect(state.peak == 2 && metrics.at("strategy") == "visual_bucket" &&
+           metrics.at("completed_total") == 18 && metrics.at("inflight") == 0 &&
+           metrics.at("visual_wave_requests_total") == 18 &&
+           metrics.at("visual_waves_total") > 0 &&
+           metrics.at("visual_bucket_dispatched")[0] == 6 &&
+           metrics.at("visual_bucket_dispatched")[1] == 6 &&
+           metrics.at("visual_bucket_dispatched")[2] == 6,
+           "visual scheduler concurrency, bucket counts or metrics incorrect");
+    Image huge{100, 100, {}};
+    expect(registry.infer("shared", huge, "oversized")["text"] == "oversized",
+           "oversized prefill should run alone when max_model_len permits chunking");
+    Image length{300, 300, {}};
+    settings["models"]["shared"]["vllm_visual_scheduler"]["max_visual_tokens"] = 2000;
+    ModelRegistry bounded(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<Probe>(state);
+    });
+    throws([&] { bounded.infer("shared", length, "too long"); });
+    auto bad = settings;
+    bad["models"]["shared"]["vllm_visual_scheduler"]["cudagraph_capture_sizes"] = Json::array({2, 1});
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["adaptive_concurrency"] = {{"enabled", true}};
+    throws([&] { validate_config(bad); });
+    bad = settings;
+    bad["models"]["shared"]["vllm_visual_scheduler"]["max_num_seqs"] = 0;
+    throws([&] { validate_config(bad); });
+    settings["models"]["shared"]["vllm_visual_scheduler"]["max_num_seqs"] = 1;
+    settings["models"]["shared"]["vllm_visual_scheduler"]["cudagraph_capture_sizes"] = Json::array({1});
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    struct Blocking : Model {
+        std::promise<void>& entered;
+        std::shared_future<void> gate;
+        Blocking(std::promise<void>& e, std::shared_future<void> g) : entered(e), gate(g) {}
+        Json infer(const Image&, const std::string& prompt) override {
+            if (prompt == "first") { entered.set_value(); gate.wait(); }
+            return {{"text", prompt}};
+        }
+    };
+    ModelRegistry cancel_pool(settings.at("models"), [&](const Json&, size_t) {
+        return std::make_unique<Blocking>(entered, gate);
+    });
+    auto first = std::async(std::launch::async, [&] {
+        Image sample{10, 10, {}}; return cancel_pool.infer("shared", sample, "first");
+    });
+    entered.get_future().wait();
+    auto token = std::make_shared<std::atomic<bool>>(false);
+    auto cancelled = std::async(std::launch::async, [&] {
+        CancellationScope scope(token.get());
+        Image sample{10, 10, {}};
+        try { cancel_pool.infer("shared", sample, "cancelled"); }
+        catch (const Cancelled&) { return true; }
+        return false;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (cancel_pool.scheduler_metrics()["shared"]["queued"] != 1 &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    token->store(true);
+    expect(cancelled.wait_for(std::chrono::seconds(1)) == std::future_status::ready &&
+           cancelled.get(), "visual scheduler failed to cancel queued request");
+    release.set_value();
+    expect(first.get()["text"] == "first", "visual scheduler blocked active inference");
+    Image next{10, 10, {}};
+    expect(cancel_pool.infer("shared", next, "recovered")["text"] == "recovered" &&
+           cancel_pool.scheduler_metrics()["shared"]["queued"] == 0,
+           "visual scheduler retained cancelled ticket");
+}
 void adaptive_concurrency_test() {
     auto settings = config();
     settings["models"]["shared"] = {{"backend", "vllm"}, {"endpoint", "http://127.0.0.1:1/v1/chat/completions"},
@@ -1254,7 +1361,7 @@ void input_format_test() {
 }
 int main() {
     try {
-        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); model_input_resize_test(); cancellation_pool_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
+        input_format_test(); layout_test(); v3_plugin_test(); v2_config_test(); pool_test(); model_input_resize_test(); cancellation_pool_test(); visual_bucket_scheduler_test(); adaptive_concurrency_test(); dynamic_batch_test(); box_pool_fairness_test(); codec_test(); postprocess_test(); pipeline_test(); composite_pipeline_test(); fallback_test(); table_fallback_test(); batch_test(); scheduler_config_test(); image_process_test();
         std::cout << "PASS: layout, shared pool, timeout/recovery, codecs, pipeline, output, subprocess\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

@@ -130,6 +130,42 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
 
 `backend: vllm`，`endpoint` 填完整 `/v1/chat/completions` URL，`model` 必须匹配 served model name。可用 `api_key_env` 指定密钥环境变量，不把密钥写进配置。
 
+### vLLM 视觉 token 分桶投递（可选）
+
+离线 BOX OCR 可在单个 vLLM 模型（v2 为 `executors.<id>`）启用 `vllm_visual_scheduler`。模型池收集来自不同文件、页面和 BOX 类型的请求，按**预处理后**的图片尺寸估算视觉 token，依据配置的边界分桶；在短等待窗口内优先选取同桶请求，使一波请求的估计 prefill 尽量填满服务端每轮 token 预算，并参考 CUDA graph 的 capture size 挑选投递波次。每个 BOX 仍是独立的 Chat Completions 请求，服务端负责连续批处理。不要设置框架 `batch_size>1`；此策略与 `adaptive_concurrency` 互斥。
+
+```json
+"ocr": {
+  "backend": "vllm", "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "model": "served-vlm", "instances": 1, "batch_size": 1,
+  "max_concurrent_requests": 32, "max_pending_requests": 256,
+  "vllm_visual_scheduler": {
+    "enabled": true,
+    "max_num_seqs": 32, "max_model_len": 8192,
+    "max_num_batched_tokens": 4096,
+    "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32],
+    "visual_pixels_per_token": 784,
+    "visual_token_overhead": 0, "max_visual_tokens": 4096,
+    "prompt_token_overhead": 64, "expected_output_tokens": 512,
+    "bucket_edges": [256, 512, 1024, 2048], "max_wait_ms": 2
+  }
+}
+```
+
+| 配置 | 用途 |
+|---|---|
+| `visual_pixels_per_token` / `visual_token_overhead` / `max_visual_tokens` | 模型专属估算：`visual = min(max_visual_tokens, visual_token_overhead + ceil(resized_width × resized_height / visual_pixels_per_token))`；按模型的 patch、动态分辨率、crop/tiling 规则实测后填写；上例仅为演示。 |
+| `bucket_edges` | 严格递增的视觉 token 上界，`upper_bound` 分桶；可按实际 BOX 面积分位数设置。 |
+| `max_model_len` | 根据 `prompt_token_overhead + ceil(prompt字节数/4) + visual + expected_output_tokens` 估算单请求长度；超出即拒绝。文本 token 估算是近似值，服务端还须正确配置截断和输入上限。 |
+| `max_num_seqs` | 服务端配置快照，限制本模型池同时发起的调用数；还受 `max_concurrent_requests` 限制。若多个模型 ID 共用一个 vLLM 服务，须合并规划各自上限。 |
+| `max_num_batched_tokens` | **每波新投递请求**估计 prefill 的软预算；单个超预算请求可独占这一波，交由 vLLM 处理分块 prefill。它不是所有在途 prompt 与输出 token 之和的硬上限。 |
+| `cudagraph_capture_sizes` | 手动填写服务端已启用的升序 capture size；选不超过当前空闲槽和排队请求数的最大 size，若都不满足则选 1。它只决定一波的投递目标，**不保证** vLLM 实际形成相同的图批次。 |
+| `max_wait_ms` | 低负载下最多等待这么久凑候选请求，默认 2 ms，范围 0–1000，必须小于 `acquire_timeout_ms`；队首到时优先服务以免某桶长期饥饿。 |
+
+`GET /v1/metrics` 中可对照 `strategy=visual_bucket`、`visual_bucket_dispatched`（按桶计数）、`visual_waves_total`、`visual_wave_requests_total`、`visual_wave_prefill_tokens_total`、`queued`、`inflight` 与 `queue_wait_ms_total`。波次指标为**投递计划数**，请求失败或取消时可能不同于成功数。建议先用代表性的大小和输出长度分布，固定 `max_concurrent_requests` 做扫描，再交替 A/B 对比 `docs/min`、成功率、vLLM Running/Waiting、图像缓存命中与 p95 排队时间；这是启发式调度，无法仅由静态配置推算全局最优吞吐。`box_workers`、页面与文档 worker 必须能持续提供请求。
+
+vLLM 参数需按实际服务版本核对：[调度器配置](https://docs.vllm.ai/en/latest/api/vllm/config/scheduler/)把 `max_num_batched_tokens` 定义为调度轮次 token 预算，`max_num_seqs` 控制序列容量；[CUDA graph 配置](https://docs.vllm.ai/en/latest/api/vllm/config/vllm/)中的 capture sizes 是图形状。框架只使用手动快照，不自动修改或抓取服务端配置。
+
 ### 离线任务自适应并发
 
 单个 vLLM 模型（v2 为 `executors.<id>`）设置 `adaptive_concurrency.enabled: true` 后，每个 BOX 独立发送请求，vLLM 保持自身的连续批处理。控制器以完成的估算工作量/秒爬山：先增大在途 token 预算，吞吐增益接近平台时按小步探测，探测造成吞吐下降时温和回退。请求数由 `max_concurrent_requests` 硬限制，适配不同大小 BOX 的主控制量为 `current_token_budget`。页面/BOX worker 必须足够多且有持续排队需求，否则无法判断提升预算是否有收益。

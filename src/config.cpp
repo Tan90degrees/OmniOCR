@@ -179,6 +179,55 @@ void validate_config(const Json& c) {
                         "adaptive_concurrency requires min_token_budget <= initial_token_budget <= token_budget");
             }
         }
+        if (m.contains("vllm_visual_scheduler")) {
+            const auto& s = m.at("vllm_visual_scheduler");
+            require(s.is_object(), "vllm_visual_scheduler must be an object");
+            const std::set<std::string> fields = {"enabled", "max_num_seqs", "max_model_len",
+                "max_num_batched_tokens", "cudagraph_capture_sizes", "visual_pixels_per_token",
+                "visual_token_overhead", "max_visual_tokens", "prompt_token_overhead",
+                "expected_output_tokens", "bucket_edges", "max_wait_ms"};
+            for (const auto& [key, value] : s.items())
+                require(fields.count(key) != 0, "unknown vllm_visual_scheduler setting: " + key);
+            if (s.contains("enabled")) require(s.at("enabled").is_boolean(),
+                "vllm_visual_scheduler.enabled must be boolean");
+            bounded(s, "max_num_seqs", 1, 1000000);
+            bounded(s, "max_model_len", 1, 1000000000);
+            bounded(s, "max_num_batched_tokens", 1, 1000000000);
+            bounded(s, "visual_pixels_per_token", 1, 1000000000);
+            bounded(s, "visual_token_overhead", 0, 1000000000);
+            bounded(s, "max_visual_tokens", 1, 1000000000);
+            bounded(s, "prompt_token_overhead", 0, 1000000000);
+            bounded(s, "expected_output_tokens", 1, 1000000000);
+            bounded(s, "max_wait_ms", 0, 1000);
+            for (const char* field : {"bucket_edges", "cudagraph_capture_sizes"}) {
+                if (!s.contains(field) && !s.value("enabled", false)) continue;
+                require(s.contains(field) && s.at(field).is_array() &&
+                    (std::string(field) != "bucket_edges" || !s.at(field).empty()) &&
+                    s.at(field).size() <= 128, std::string(field) + " must be an array of at most 128 integers (bucket_edges nonempty)");
+                int64_t previous = 0;
+                for (const auto& value : s.at(field)) {
+                    require(value.is_number_integer() || value.is_number_unsigned(),
+                        std::string(field) + " must contain integers");
+                    const auto item = value.get<int64_t>();
+                    require(item > previous && item <= 1000000000,
+                        std::string(field) + " must be positive and strictly increasing");
+                    previous = item;
+                }
+            }
+            if (s.value("enabled", false)) {
+                require(backend == "vllm" && !needs_batch && overrides.empty(),
+                    "visual scheduler requires vllm, batch_size 1 and no instance_overrides");
+                require(!m.value("adaptive_concurrency", Json::object()).value("enabled", false),
+                    "visual scheduler and adaptive_concurrency cannot both be enabled");
+                for (const char* key : {"max_num_seqs", "max_model_len", "max_num_batched_tokens", "visual_pixels_per_token"})
+                    require(s.contains(key), std::string("missing vllm_visual_scheduler.") + key);
+                require(s.at("cudagraph_capture_sizes").empty() ||
+                    s.at("cudagraph_capture_sizes").back().get<int64_t>() <= s.at("max_num_seqs").get<int64_t>(),
+                    "capture sizes must not exceed max_num_seqs");
+                require(s.value("max_wait_ms", 2) < m.value("acquire_timeout_ms", 60000),
+                    "max_wait_ms must be less than acquire_timeout_ms");
+            }
+        }
         if (backend == "vllm" || backend == "http_json") {
             const auto url = m.at("endpoint").get<std::string>();
             require(url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0, "endpoint must be an HTTP(S) URL");

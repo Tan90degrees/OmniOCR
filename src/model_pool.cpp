@@ -32,8 +32,25 @@ struct ModelRegistry::Impl {
         std::vector<Slot> slots;
         std::deque<size_t> available;
         std::deque<std::shared_ptr<Request>> queue;
-        struct ScalarWaiter { uint64_t ticket; size_t tokens; int bypasses = 0; };
+        struct ScalarWaiter {
+            uint64_t ticket; size_t tokens; int bypasses = 0;
+            size_t visual = 0, prefill = 0, bucket = 0;
+            std::chrono::steady_clock::time_point queued_at{};
+        };
         std::deque<ScalarWaiter> scalar_queue;
+        // A wave is an admission hint, not a vLLM batch. Each ticket still
+        // issues its own HTTP call and vLLM retains continuous batching.
+        bool visual_scheduler = false;
+        int visual_pixels_per_token = 784, visual_overhead = 0;
+        int visual_cap = 1000000, prompt_overhead = 64, visual_output_tokens = 512;
+        int server_max_seqs = 1, server_model_len = 8192, server_batched_tokens = 8192;
+        int visual_wait_ms = 2;
+        std::vector<size_t> bucket_edges;
+        std::vector<int> capture_sizes;
+        std::deque<uint64_t> dispatch_wave;
+        uint64_t waves_total = 0, wave_requests_total = 0, wave_prefill_total = 0;
+        std::vector<uint64_t> bucket_dispatched;
+        size_t inflight_visual_tokens = 0, peak_inflight_visual_tokens = 0;
         uint64_t next_ticket = 0;
         std::vector<std::thread> workers;
         std::mutex mutex;
@@ -136,17 +153,84 @@ struct ModelRegistry::Impl {
             return size_t(std::max(1.0, std::ceil(double(raw) * token_scale)));
         }
         size_t normalized_work(const Image& image, const std::string& prompt) const {
+            if (visual_scheduler)
+                return size_t(prompt_overhead) + (prompt.size() + 3) / 4 +
+                    visual_cost(image) + size_t(visual_output_tokens);
             const uint64_t pixels = uint64_t(std::max(1, image.width)) * uint64_t(std::max(1, image.height));
             return size_t(64 + (prompt.size() + 3) / 4 + uint64_t(expected_output_tokens) +
                 (pixels + uint64_t(pixels_per_token) - 1) / uint64_t(pixels_per_token));
+        }
+        size_t visual_cost(const Image& image) const {
+            const uint64_t pixels = uint64_t(image.width) * uint64_t(image.height);
+            return size_t(std::min<uint64_t>(visual_cap,
+                uint64_t(visual_overhead) + (pixels + visual_pixels_per_token - 1) / visual_pixels_per_token));
+        }
+        // Must be called with mutex held. A wave prefers a dense bucket and
+        // packs its estimated prefill into one scheduler-iteration budget.
+        // A single oversized prompt may still run (vLLM may chunk prefill).
+        void plan_visual_wave() {
+            if (!dispatch_wave.empty() || scalar_queue.empty() || available.empty() ||
+                inflight >= size_t(server_max_seqs)) return;
+            const size_t capacity = std::min({available.size(), scalar_queue.size(),
+                size_t(server_max_seqs) - inflight});
+            size_t target = capacity;
+            if (!capture_sizes.empty()) {
+                target = 0;
+                for (int size : capture_sizes)
+                    if (size <= int(capacity)) target = size;
+                if (!target) target = 1;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            const auto oldest = std::min_element(scalar_queue.begin(), scalar_queue.end(),
+                [](const auto& a, const auto& b) { return a.queued_at < b.queued_at; });
+            if (visual_wait_ms && scalar_queue.size() < std::min(available.size(),
+                size_t(server_max_seqs) - inflight) &&
+                now - oldest->queued_at < std::chrono::milliseconds(visual_wait_ms)) return;
+            size_t chosen = oldest->bucket;
+            if (now - oldest->queued_at < std::chrono::milliseconds(visual_wait_ms)) {
+                size_t best_count = 0, best_work = 0;
+                for (size_t b = 0; b <= bucket_edges.size(); ++b) {
+                    size_t count = 0, work = 0;
+                    for (const auto& waiter : scalar_queue)
+                        if (waiter.bucket == b && count < target &&
+                            (!count || work + waiter.prefill <= size_t(server_batched_tokens))) {
+                            ++count; work += waiter.prefill;
+                        }
+                    if (count > best_count || (count == best_count && work > best_work)) {
+                        best_count = count; best_work = work; chosen = b;
+                    }
+                }
+            }
+            size_t work = 0;
+            auto append = [&](const ScalarWaiter& waiter) {
+                if (dispatch_wave.size() >= target) return;
+                if (!dispatch_wave.empty() &&
+                    (waiter.prefill > size_t(server_batched_tokens) ||
+                     work > size_t(server_batched_tokens) - waiter.prefill)) return;
+                dispatch_wave.push_back(waiter.ticket);
+                work += waiter.prefill;
+            };
+            for (const auto& waiter : scalar_queue)
+                if (waiter.bucket == chosen) append(waiter);
+            for (const auto& waiter : scalar_queue)
+                if (waiter.bucket != chosen) append(waiter);
+            if (!dispatch_wave.empty()) {
+                ++waves_total;
+                wave_requests_total += dispatch_wave.size();
+                wave_prefill_total += work;
+            }
         }
         bool fits(size_t tokens) const {
             return inflight < size_t(target) &&
                    (!inflight || (tokens <= current_token_budget &&
                                    inflight_tokens <= current_token_budget - tokens));
         }
-        uint64_t next_admissible() const {
+        uint64_t next_admissible() {
             if (scalar_queue.empty() || available.empty()) return std::numeric_limits<uint64_t>::max();
+            if (visual_scheduler) {
+                plan_visual_wave();
+                return dispatch_wave.empty() ? std::numeric_limits<uint64_t>::max() : dispatch_wave.front();
+            }
             if (!adaptive) return scalar_queue.front().ticket;
             if (fits(scalar_queue.front().tokens)) return scalar_queue.front().ticket;
             // Avoid head-of-line blocking on an oversized BOX. The head may
@@ -294,8 +378,9 @@ struct ModelRegistry::Impl {
         }
         Json metrics() {
             std::lock_guard<std::mutex> guard(mutex);
-            return {{"strategy", adaptive ? "adaptive" : "fixed"},
-                    {"concurrency_limit", adaptive ? target : max_concurrent},
+            return {{"strategy", adaptive ? "adaptive" : visual_scheduler ? "visual_bucket" : "fixed"},
+                    {"concurrency_limit", adaptive ? target : visual_scheduler ?
+                        std::min(max_concurrent, server_max_seqs) : max_concurrent},
                     {"max_concurrency", max_concurrent}, {"inflight", inflight},
                     {"inflight_estimated_tokens", inflight_tokens},
                     {"token_budget", adaptive ? token_budget : 0},
@@ -319,7 +404,13 @@ struct ModelRegistry::Impl {
                     {"cooldown_remaining_ms", adaptive ? std::max<int64_t>(0,
                          std::chrono::duration_cast<std::chrono::milliseconds>(
                              backoff_until - std::chrono::steady_clock::now()).count()) : 0},
-                    {"queue_wait_ms_total", queue_wait_ms_total}};
+                    {"queue_wait_ms_total", queue_wait_ms_total},
+                    {"visual_waves_total", waves_total},
+                    {"visual_wave_requests_total", wave_requests_total},
+                    {"visual_wave_prefill_tokens_total", wave_prefill_total},
+                    {"visual_bucket_dispatched", bucket_dispatched},
+                    {"inflight_visual_tokens", inflight_visual_tokens},
+                    {"peak_inflight_visual_tokens", peak_inflight_visual_tokens}};
         }
         ~Pool() {
             { std::lock_guard<std::mutex> guard(mutex); stopping = true; }
@@ -441,7 +532,17 @@ struct ModelRegistry::Impl {
             const size_t tokens = adaptive ? estimate_tokens(*input, prompt) : 0;
             const size_t work = adaptive ? normalized_work(*input, prompt) : 0;
             const auto queued_at = std::chrono::steady_clock::now();
-            scalar_queue.push_back({ticket, tokens});
+            ScalarWaiter waiter{ticket, tokens};
+            if (visual_scheduler) {
+                waiter.visual = visual_cost(*input);
+                waiter.prefill = size_t(prompt_overhead) + (prompt.size() + 3) / 4 + waiter.visual;
+                if (waiter.prefill + size_t(visual_output_tokens) > size_t(server_model_len))
+                    throw std::runtime_error("estimated vLLM request exceeds max_model_len");
+                waiter.bucket = size_t(std::upper_bound(bucket_edges.begin(), bucket_edges.end(),
+                    waiter.visual) - bucket_edges.begin());
+                waiter.queued_at = queued_at;
+            }
+            scalar_queue.push_back(waiter);
             const bool budget_blocked = adaptive && inflight &&
                 (inflight_tokens > current_token_budget || tokens > current_token_budget - inflight_tokens);
             if (budget_blocked) { ++window_budget_pressure; ++budget_pressure_total; }
@@ -452,11 +553,20 @@ struct ModelRegistry::Impl {
             }
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             while (next_admissible() != ticket && !cancellation_requested() &&
-                   std::chrono::steady_clock::now() < deadline)
-                ready.wait_until(lock, std::min(deadline,
-                    std::chrono::steady_clock::now() + std::chrono::milliseconds(20)));
+                   std::chrono::steady_clock::now() < deadline) {
+                auto wake = std::min(deadline,
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(20));
+                if (visual_scheduler && !scalar_queue.empty() && available.size() &&
+                    inflight < size_t(server_max_seqs) && dispatch_wave.empty()) {
+                    const auto oldest = std::min_element(scalar_queue.begin(), scalar_queue.end(),
+                        [](const auto& a, const auto& b) { return a.queued_at < b.queued_at; });
+                    wake = std::min(wake, oldest->queued_at + std::chrono::milliseconds(visual_wait_ms));
+                }
+                ready.wait_until(lock, wake);
+            }
             if (next_admissible() != ticket || cancellation_requested()) {
                 if (!cancellation_requested()) ++acquisition_timeout_total;
+                dispatch_wave.erase(std::remove(dispatch_wave.begin(), dispatch_wave.end(), ticket), dispatch_wave.end());
                 scalar_queue.erase(std::find_if(scalar_queue.begin(), scalar_queue.end(),
                     [&](const ScalarWaiter& waiter) { return waiter.ticket == ticket; }));
                 lock.unlock(); ready.notify_all();
@@ -465,19 +575,26 @@ struct ModelRegistry::Impl {
             }
             auto selected = std::find_if(scalar_queue.begin(), scalar_queue.end(),
                 [&](const ScalarWaiter& waiter) { return waiter.ticket == ticket; });
-            if (selected != scalar_queue.begin()) ++scalar_queue.front().bypasses;
+            if (visual_scheduler) {
+                dispatch_wave.pop_front();
+                ++bucket_dispatched[selected->bucket];
+            } else if (selected != scalar_queue.begin()) ++scalar_queue.front().bypasses;
             scalar_queue.erase(selected);
             queue_wait_ms_total += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - queued_at).count();
             size_t index = available.front(); available.pop_front();
             ++inflight;
             if (adaptive) inflight_tokens += tokens;
+            if (visual_scheduler) {
+                inflight_visual_tokens += waiter.visual;
+                peak_inflight_visual_tokens = std::max(peak_inflight_visual_tokens, inflight_visual_tokens);
+            }
             const auto epoch = control_epoch;
             lock.unlock();
             ready.notify_all();
             // Returning a lease is exception safe. No instance is used concurrently.
             struct Lease {
-                Pool& pool; size_t index;
+                Pool& pool; size_t index, visual;
                 bool failed = true, overloaded = false;
                 size_t work = 0;
                 ~Lease() {
@@ -485,6 +602,7 @@ struct ModelRegistry::Impl {
                       pool.available.push_back(index);
                       if (!pool.adaptive) {
                           --pool.inflight;
+                          if (pool.visual_scheduler) pool.inflight_visual_tokens -= visual;
                           ++pool.completed_total;
                           if (failed) ++pool.failed_total;
                           else pool.completed_normalized_work_total += work;
@@ -493,7 +611,7 @@ struct ModelRegistry::Impl {
                       } }
                     pool.ready.notify_all();
                 }
-            } lease{*this, index};
+            } lease{*this, index, waiter.visual};
             if (!adaptive) {
                 try {
                     throw_if_cancelled();
@@ -624,6 +742,34 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
                     throw std::runtime_error("invalid adaptive_concurrency settings for " + id);
             }
         }
+        if (config.contains("vllm_visual_scheduler")) {
+            const auto& s = config.at("vllm_visual_scheduler");
+            if (!s.is_object()) throw std::runtime_error("invalid vllm_visual_scheduler for " + id);
+            pool->visual_scheduler = s.value("enabled", false);
+            if (pool->visual_scheduler) {
+                if (config.value("backend", std::string{}) != "vllm" || pool->adaptive)
+                    throw std::runtime_error("visual scheduler requires vllm without adaptive_concurrency: " + id);
+                pool->server_max_seqs = s.at("max_num_seqs").get<int>();
+                pool->server_model_len = s.at("max_model_len").get<int>();
+                pool->server_batched_tokens = s.at("max_num_batched_tokens").get<int>();
+                pool->visual_pixels_per_token = s.at("visual_pixels_per_token").get<int>();
+                pool->visual_overhead = s.value("visual_token_overhead", 0);
+                pool->visual_cap = s.value("max_visual_tokens", 1000000);
+                pool->prompt_overhead = s.value("prompt_token_overhead", 64);
+                pool->visual_output_tokens = s.value("expected_output_tokens", 512);
+                pool->expected_output_tokens = pool->visual_output_tokens;
+                pool->visual_wait_ms = s.value("max_wait_ms", 2);
+                pool->bucket_edges = s.at("bucket_edges").get<std::vector<size_t>>();
+                pool->capture_sizes = s.at("cudagraph_capture_sizes").get<std::vector<int>>();
+                pool->bucket_dispatched.resize(pool->bucket_edges.size() + 1);
+                if (pool->server_max_seqs < 1 || pool->server_model_len < 1 ||
+                    pool->server_batched_tokens < 1 || pool->visual_pixels_per_token < 1 ||
+                    pool->visual_cap < 1 || pool->visual_overhead < 0 || pool->prompt_overhead < 0 ||
+                    pool->visual_output_tokens < 1 || pool->visual_wait_ms < 0 ||
+                    pool->visual_wait_ms >= pool->timeout_ms)
+                    throw std::runtime_error("invalid visual scheduler settings: " + id);
+            }
+        }
         if (default_batch < 1 || default_batch > 128 || default_wait < 0 ||
             (default_batch > 1 && default_wait >= pool->timeout_ms))
             throw std::runtime_error("invalid batch settings for " + id);
@@ -656,6 +802,8 @@ ModelRegistry::ModelRegistry(const Json& models, ModelFactory factory) : impl_(s
         }
         if (pool->adaptive && pool->batching)
             throw std::runtime_error("adaptive_concurrency does not support native batching: " + id);
+        if (pool->visual_scheduler && pool->batching)
+            throw std::runtime_error("visual scheduler does not support native batching: " + id);
         pool->start();
         impl_->pools.emplace(id, std::move(pool));
     }
