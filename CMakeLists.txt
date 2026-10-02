@@ -70,6 +70,10 @@ if(OMNIOCR_BUILD_TESTS)
     add_executable(omniocr_tests tests/core_tests.cpp)
     target_link_libraries(omniocr_tests PRIVATE omniocr_core)
     add_test(NAME core COMMAND omniocr_tests)
+    add_executable(omniocr_async_recognition_tests tests/async_recognition_tests.cpp)
+    target_link_libraries(omniocr_async_recognition_tests PRIVATE omniocr_core)
+    add_test(NAME async_recognition COMMAND omniocr_async_recognition_tests)
+    set_tests_properties(async_recognition PROPERTIES TIMEOUT 30)
     # Exercise the real ACL engine control path with a tiny fake runtime in CI,
     # including machines that have no CANN installation or NPU.
     add_executable(omniocr_acl_stream_tests tests/acl_stream_tests.cpp src/backends/acl.cpp)

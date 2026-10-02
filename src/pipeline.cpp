@@ -1,5 +1,6 @@
 #include "omniocr/core.hpp"
 #include "omniocr/plugins.hpp"
+#include "recognition_pool.hpp"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -12,6 +13,14 @@ namespace omniocr {
 Pipeline::Pipeline(Json config, ModelFactory factory) : config_(normalize_config(config)) {
     validate_config(config_);
     models_ = std::make_unique<ModelRegistry>(config_.at("models"), std::move(factory));
+    const auto settings = config_.value("execution", Json::object())
+        .value("async_recognition", Json::object());
+    if (settings.value("enabled", false))
+        recognition_pool_ = std::make_unique<RecognitionTaskPool>(settings);
+}
+Pipeline::~Pipeline() = default;
+Json Pipeline::recognition_metrics() {
+    return recognition_pool_ ? recognition_pool_->metrics() : Json{{"enabled", false}};
 }
 Page Pipeline::process_page(int number, const Image& image, const fs::path& output_dir,
                             int box_workers, const BoxSubmit& submit, const CancellationToken& cancel) {
@@ -60,10 +69,34 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             config_.value("postprocess",Json::object()),image,detect);
         Page page; page.number = number; page.width = image.width; page.height = image.height;
         page.regions.resize(boxes.size());
-        // Only worker_count crops exist simultaneously. BOX tasks rejoin the
-        // global pool after each region so a dense page cannot monopolize it.
+        // Preparation rejoins the shared BOX pool after each region. Optional
+        // recognition work has its own request/byte bounds and page lifetime.
         std::atomic<size_t> next{0}; std::atomic<bool> stop{false};
         std::exception_ptr error; std::mutex error_mutex;
+        struct PendingRecognition {
+            std::mutex mutex;
+            std::condition_variable done;
+            size_t count = 0;
+            void add() { std::lock_guard<std::mutex> lock(mutex); ++count; }
+            void finish() { std::lock_guard<std::mutex> lock(mutex); if (!--count) done.notify_all(); }
+            void wait() { std::unique_lock<std::mutex> lock(mutex); done.wait(lock, [&] { return count == 0; }); }
+            ~PendingRecognition() { wait(); }
+        } pending;
+        auto record_error = [&](size_t i, std::exception_ptr failure) {
+            try { std::rethrow_exception(failure); }
+            catch (const Cancelled&) {
+                std::lock_guard<std::mutex> lock(error_mutex);
+                if (!error) error = failure;
+                stop = true;
+            } catch (const std::exception& e) {
+                if (record) page.regions[i].error = e.what();
+                else { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error = failure; stop = true; }
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(error_mutex);
+                if (!error) error = failure;
+                stop = true;
+            }
+        };
         auto work_one = [&](size_t i) {
             CancellationScope box_scope(cancel.get());
             Region& region = page.regions[i];
@@ -90,45 +123,53 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                     if (!out) throw std::runtime_error("cannot write crop asset");
                 }
                 if (action == "recognize") {
-                    std::vector<std::string> candidates;
-                    if (route->contains("models")) candidates = route->at("models").get<std::vector<std::string>>();
-                    else candidates = {route->at("model").get<std::string>()};
-                    std::string failures;
-                    bool recognized = false;
-                    for (const auto& candidate : candidates) {
-                        try {
-                            auto result = models_->infer(candidate, crop, route->value("prompt", "Text Recognition:"));
-                            throw_if_cancelled();
-                            // A candidate is successful only after task-specific adapter decoding.
-                            // Malformed model output is handled by the same candidate fallback.
-                            auto decoded = decode_recognition(result, *route, region.box.type);
-                            region.raw_text = std::move(decoded.raw_text);
-                            region.text = std::move(decoded.text);
-                            // Expose the configured v2 model binding while leasing its
-                            // shared executor pool internally by candidate ID.
-                            if (route->contains("binding_ids") && route->at("binding_ids").contains(candidate))
-                                region.model = route->at("binding_ids").at(candidate).get<std::string>();
-                            else region.model = route->value("binding_id", candidate);
-                            recognized = true;
-                            break;
-                        } catch (const Cancelled&) { throw; }
-                        catch (const std::exception& e) {
-                            if (!failures.empty()) failures += "; ";
-                            failures += candidate + ": " + e.what();
+                    const auto bytes = crop.rgb.size();
+                    auto recognize = [&, i, route, owned = std::make_shared<Image>(std::move(crop))] {
+                        CancellationScope recognition_scope(cancel.get());
+                        throw_if_cancelled();
+                        if (stop.load()) throw Cancelled();
+                        auto& region = page.regions[i];
+                        std::vector<std::string> candidates;
+                        if (route->contains("models")) candidates = route->at("models").get<std::vector<std::string>>();
+                        else candidates = {route->at("model").get<std::string>()};
+                        std::string failures;
+                        bool recognized = false;
+                        for (const auto& candidate : candidates) {
+                            try {
+                                auto result = models_->infer(candidate, *owned, route->value("prompt", "Text Recognition:"));
+                                throw_if_cancelled();
+                                // A candidate is successful only after task-specific adapter decoding.
+                                // Malformed model output is handled by the same candidate fallback.
+                                auto decoded = decode_recognition(result, *route, region.box.type);
+                                region.raw_text = std::move(decoded.raw_text);
+                                region.text = std::move(decoded.text);
+                                // Expose the configured v2 model binding while leasing its
+                                // shared executor pool internally by candidate ID.
+                                if (route->contains("binding_ids") && route->at("binding_ids").contains(candidate))
+                                    region.model = route->at("binding_ids").at(candidate).get<std::string>();
+                                else region.model = route->value("binding_id", candidate);
+                                recognized = true;
+                                break;
+                            } catch (const Cancelled&) { throw; }
+                            catch (const std::exception& e) {
+                                if (!failures.empty()) failures += "; ";
+                                failures += candidate + ": " + e.what();
+                            }
                         }
-                    }
-                    if (!recognized) throw std::runtime_error("all recognition models failed: " + failures);
+                        if (!recognized) throw std::runtime_error("all recognition models failed: " + failures);
+                    };
+                    if (recognition_pool_) {
+                        pending.add();
+                        try {
+                            recognition_pool_->submit(bytes,
+                                [i, recognize = std::move(recognize), record_error] {
+                                    try { recognize(); }
+                                    catch (...) { record_error(i, std::current_exception()); throw; }
+                                }, [&] { return stop.load(); }, [&] { pending.finish(); });
+                        } catch (...) { pending.finish(); throw; }
+                    } else recognize();
                 }
-            } catch (const Cancelled&) {
-                std::lock_guard<std::mutex> lock(error_mutex);
-                if (!error) error = std::current_exception();
-                stop = true;
-            } catch (const std::exception& e) {
-                if (record) region.error = e.what();
-                else { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error = std::current_exception(); stop = true; }
-            } catch (...) {
-                std::lock_guard<std::mutex> lock(error_mutex); if (!error) error = std::current_exception(); stop = true;
-            }
+            } catch (...) { record_error(i, std::current_exception()); }
         };
         auto work = [&] {
             while (!stop.load() && !cancellation_requested()) {
@@ -142,6 +183,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         // and immediately joining another OS thread for every serial page.
         if (worker_count <= 1) {
             work();
+            pending.wait();
             throw_if_cancelled();
             if (error) std::rethrow_exception(error);
             finalize_composite_page(page,config_.value("postprocess",Json::object()),output_dir);
@@ -171,7 +213,10 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
                         if (!error) error = std::current_exception();
                     }
                 }
-                if (outstanding.fetch_sub(1) == 1) done.notify_one();
+                if (outstanding.fetch_sub(1) == 1) {
+                    std::lock_guard<std::mutex> guard(done_mutex);
+                    done.notify_one();
+                }
             };
             try {
                 for (size_t i = 0; i < worker_count && !stop.load(); ++i) {
@@ -187,6 +232,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
             }
             std::unique_lock<std::mutex> lock(done_mutex);
             done.wait(lock, [&] { return outstanding.load() == 0; });
+            pending.wait();
             throw_if_cancelled();
             if (error) std::rethrow_exception(error);
             finalize_composite_page(page,config_.value("postprocess",Json::object()),output_dir);
@@ -197,6 +243,7 @@ Page Pipeline::process_page(int number, const Image& image, const fs::path& outp
         try { for (size_t i = 0; i < worker_count; ++i) threads.emplace_back(work); }
         catch (...) { stop = true; for (auto& t : threads) t.join(); throw; }
         for (auto& t : threads) t.join();
+        pending.wait();
         throw_if_cancelled();
         if (error) std::rethrow_exception(error);
     finalize_composite_page(page,config_.value("postprocess",Json::object()),output_dir);

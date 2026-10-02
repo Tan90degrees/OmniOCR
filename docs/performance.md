@@ -32,7 +32,7 @@
 
 配置 `instances: 1, max_concurrent_requests: 8` 可让同一个 vLLM endpoint 最多同时收到 8 个请求；在同一配置文件设置 `execution.box_workers: 8` 后，REST 和批处理的单页多 BOX 也能填充这些请求槽位，命令行/批处理清单可临时覆盖。页面布局仍先执行，`execution.document_workers` 和 `execution.page_workers` 控制读取与在处理页面数，远端服务仍需具备相应容量。对 `batch_size>1` 的后端，该参数限制并行批次数；`max_concurrent_requests × batch_size` 只是理论最大有效样本数，实际取决于请求到达和尾批窗口。本地 ACL/ONNX 不能安全地由多个线程共享同一不可重入句柄，额外槽位会加载额外模型副本，需要实测设备内存和真实吞吐。
 
-全局模型队列使用空闲实例领取队首 BOX，不预分配固定实例队列；配置每实例 batch/window 时，尺寸小的实例可能优先处理零散任务，尺寸大的实例在请求足够或窗口到期时执行。模型等待仍占用调用方 BOX 工作线程，吞吐上限还取决于 `box_workers`；下一步可对等待推理的 BOX 引入异步完成回调以降低线程占用。该调度改动尚无目标 NPU 的前后对照数据，不能以先前基准的倍率宣称本轮收益。
+全局模型队列使用空闲实例领取队首 BOX，不预分配固定实例队列；配置每实例 batch/window 时，尺寸小的实例可能优先处理零散任务，尺寸大的实例在请求足够或窗口到期时执行。同步模式的模型等待仍占用 BOX 线程；可启用 `execution.async_recognition` 将裁剪准备与模型等待拆开，通过请求数和 RGB 字节总额对候选供给背压。独立识别池使用固定线程数，HTTP 在途上限仍由模型池控制。该调度改动尚无目标 NPU 的前后对照数据，不能以先前基准的倍率宣称本轮收益。
 
 vLLM 可按模型启用[自适应并发配置](configuration.md#离线任务自适应并发)。其 token 预算是客户端的近似在途需求，并非服务端 KV cache 的实时余量；吞吐窗口只统计当前模型 ID 的已完成请求。进行离线测量时，请对照固定并发 1/4/8/16/32 与自适应模式，在相同输入、服务端 `max_num_seqs`/`max_num_batched_tokens`、BOX/page/document workers 和模型参数下预热、交替重复运行。按 BOX 面积和估计输出长度分桶报告完成文档/BOX 吞吐、P50/P95/P99、HTTP 429/503、在途并发、排队等待、token 估计与真实 usage、NPU 利用率及 KV cache 占用。长尾小 BOX/大 BOX 混合负载尤其需要验证；本地模拟测试证明控制行为，不代表昇腾机器上的最优点。
 

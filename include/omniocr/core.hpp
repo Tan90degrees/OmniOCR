@@ -132,15 +132,18 @@ struct BatchResult {
     Document document;
     std::string error;            // document-level failure; other jobs continue
 };
+class RecognitionTaskPool;
 class Pipeline {
 public:
     explicit Pipeline(Json config, ModelFactory factory = make_model);
+    ~Pipeline();
     Document run(const fs::path& input, const fs::path& output_dir);
     // One shared model registry, bounded page workers, independent document results.
     // Returned entries match the original job ordering; page numbers remain ascending.
     std::vector<BatchResult> run_batch(const std::vector<BatchJob>& jobs,
                                        BatchOptions options = {});
     Json model_metrics() { return models_->scheduler_metrics(); }
+    Json recognition_metrics();
 private:
     friend class ServerScheduler;  // Persistent REST dispatcher shares the bounded model registry.
     using BoxSubmit = std::function<std::future<void>(std::function<void()>)>;
@@ -149,6 +152,7 @@ private:
                       const CancellationToken& cancel = {});
     Json config_;
     std::unique_ptr<ModelRegistry> models_;
+    std::unique_ptr<RecognitionTaskPool> recognition_pool_;
 };
 Json document_json(const Document&, int schema_version = 0);
 std::string document_markdown(const Document&);

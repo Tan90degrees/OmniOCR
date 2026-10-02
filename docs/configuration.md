@@ -10,7 +10,8 @@
 |---|---|---|
 | `execution.workers` | 4 | 单文件 CLI 的 BOX 线程数；也是批处理/REST 的页面线程数回退值，范围 1–128 |
 | `execution.page_workers` | `execution.workers` | REST 和批处理共享的页面线程数，范围 1–128 |
-| `execution.box_workers` | 1 | REST 和批处理共享的 BOX 线程数，范围 1–128 |
+| `execution.box_workers` | 1 | REST 和批处理共享的 BOX 线程数，范围 1–128；启用异步识别后负责准备与提交 |
+| `execution.async_recognition` | 关闭 | 独立有界识别池，适用于 CLI、批处理和 REST，见下节 |
 | `execution.document_workers` | 2 | 同时读取/转换的文档数，范围 1–32 |
 | `execution.max_queued_pages` | 2 | 待处理页面队列长度，范围 1–256 |
 | `execution.on_error` | `fail` | `fail` 或 `record`，仅控制 BOX 错误 |
@@ -80,6 +81,40 @@ v1 顶层和 v2 顶层都可设置 `postprocess`，所有开关默认为 `false`
 
 `cross_page_tables` 仅合并**相邻页**页尾与页首、水平位置对齐、同列数的简单 HTML `<table>`；默认要求表格分别位于距页边 10% 内、水平重合达到较宽表格宽度的 75%。重复表头行会移除；设 `require_header_match: true` 时只有两页表头相同才合并。合并结果放在首次出现的页，后续页表格 BOX 保留坐标与原始识别结果 `raw_text`，清空用于 Markdown 的 `text`，并通过 `extensions.omniocr.merged_into` 指向首个 BOX；首个 BOX 记录 `merged_pages`。含嵌套表格、`rowspan`/`colspan`、列数变化或非纯表格 HTML 的结果保持原样，避免猜测单元格关系。开启相应功能时，带扩展元数据的结果自动使用 JSON schema v2；显式指定 schema v1 会舍弃扩展元数据。
 
+## 异步 BOX 识别（可选）
+
+同步路径的 BOX 线程会在模型排队和 HTTP 返回期间占用线程。启用 `execution.async_recognition` 后，BOX 线程只负责裁剪、旋转、保存资产和提交；独立识别池执行模型调用、候选回退与适配器解码，并按原 BOX 位置写回结果。页面完成、失败或取消前会等待已提交任务清理，之后再做复合框后处理。布局识别仍在页面线程运行。所有页面共享一套识别池，不为每页创建识别线程。
+
+```json
+"execution": {
+  "box_workers": 8,
+  "on_error": "record",
+  "async_recognition": {
+    "enabled": true,
+    "workers": 128,
+    "max_requests": 256,
+    "max_bytes": 268435456,
+    "enqueue_timeout_ms": 600000
+  }
+}
+```
+
+| 字段 | 默认值 | 语义 |
+|---|---|---|
+| `enabled` | false | 显式启用，未配置时保留同步路径 |
+| `workers` | 128 | 独立识别线程数，1–256；包含正在等待模型租赁的任务，不等于 HTTP 并发 |
+| `max_requests` | 256 | 所有已接纳任务数上限（排队＋执行＋模型租赁等待），1–1000000 |
+| `max_bytes` | 268435456 | 已接纳任务持有的原始 RGB 裁剪图像字节总额，1 字节–1 TiB；执行中的图片也占用配额 |
+| `enqueue_timeout_ms` | 600000 | 等待识别池容量的上限，1–3600000 ms；满载时背压准备线程，超时按 BOX 错误策略处理 |
+
+真实后端并发继续由模型的 `max_concurrent_requests`、自适应 token 预算或视觉调度准入控制。第一轮可保持 **64 个 HTTP 槽位，128 个识别线程**，让额外识别线程形成可供视觉调度选择的模型等待队列；不要把准备线程数、识别线程数和 HTTP 槽位同时调大。开启后 `box_workers=1` 也能准备下一张图，不再把 HTTP 在途数限制为 1。`workers` 不超过 HTTP 槽位时，识别池内的待执行任务仍有界，但模型池通常不会获得很多候选。示例见 `configs/paddle-http-vllm-async.json`。
+
+单张裁剪图像超过 `max_bytes` 会拒绝，不绕过预算。该字节上限不是 RSS 上限：原页、各准备线程当前裁剪、模型 `input_resize` 产生的副本、PNG/Base64、HTTP 与输出缓冲另外占用内存。容量按整个 Pipeline 共享，多个路由/模型共同消耗识别线程；某后端长期阻塞会减少其他后端可用的识别线程。
+
+`enqueue_timeout_ms`、模型 `acquire_timeout_ms` 和 HTTP `timeout_seconds` 分别控制识别池容量等待、模型实例租赁等待、完整 HTTP 请求。将 `acquire_timeout_ms` 设为 600000 **不会**把默认 120 秒 HTTP 超时一起提高。HTTP 超时可能发生在请求已交给 vLLM 之后，框架不自动重试或保证服务端已停止计算。
+
+REST `/v1/metrics` 新增顶层 `recognition`；C++ 可调用 `Pipeline::recognition_metrics()`。它包含 `queued/running/admitted/admitted_bytes`、峰值、提交/完成/失败/取消数、准入超时与超大图片计数。识别池统计完整路由任务，成功回退算一个成功任务；模型指标统计每次后端尝试。识别池 `completed_total` 包含失败和取消。
+
 ## 模型池
 
 `instances` 默认 1，范围 1–128；`max_concurrent_requests` 默认等于 `instances`，范围 1–128，控制此模型 ID **同时在途的后端调用数**；`acquire_timeout_ms` 默认 60000。比如一套已部署的 vLLM 权重用 `instances: 1, max_concurrent_requests: 8`，框架建立 8 个可复用的 HTTP 客户端，同时最多发出 8 个请求，远端模型仍只有一套。小于 `instances` 时只启用前若干槽位；大于 `instances` 时为每个额外槽位构建独立模型句柄，以免一个句柄被并发访问。**本地 ACL/ONNX 及外部插件可能因此加载额外权重和设备缓冲**，资源须按 `max(instances, max_concurrent_requests)` 个句柄预算；不支持共享一个不可重入的本地推理句柄。对 ACL，`device_ids: [0,1]` 按句柄序号轮转分配设备。
@@ -103,7 +138,7 @@ v1 顶层和 v2 顶层都可设置 `postprocess`，所有开关默认为 `false`
 
 每个模型 ID（v2 为每个 `executor`）独立设置 `batch_size`，默认 1，范围 1–128；大于 1 时启用全 Pipeline 共享的组批队列，同一模型来自**不同文件、页面和 BOX 类型**的请求可进入一批。`max_batch_wait_ms` 默认 5、范围 0–1000：从队首请求到达起最多等待该时间，达到批大小则立即执行，尾批到时执行；必须小于 `acquire_timeout_ms`。`max_pending_requests` 默认 256，至少等于 `batch_size`，排满或排队超时都会明确失败；候选模型可按原路由规则回退。`max_concurrent_requests` 控制并行批次数上限，每个活跃槽位执行一次原生批量调用；结果按提交顺序归还给原 BOX，文档输出仍按页号和阅读顺序排列。
 
-`instance_overrides` 可按活跃槽位编号覆盖 `batch_size` 和 `max_batch_wait_ms`，数组第 0 项对应实例 0，未列出的实例继承模型级设置。所有实例从**同一个模型 ID 的全局 BOX 队列**取任务；空闲实例按各自的批大小取队首请求，达到其窗口时执行尾批，避免预先将 BOX 固定分片到繁忙实例。队列上限至少覆盖模型级与各实例设置中最大的批大小；静态 batch ONNX/ACL 权重必须与相应实例的设置匹配，不同尺寸的实例要有相容的模型形状。`batch_size: 1` 的槽位直接执行单条推理。若所有实例都设为 1，沿用无后台组批线程的有界 FIFO 实例租赁路径。全局队列不会越过 `box_workers` 的输入并发上限，实测时须同时配置该值。
+`instance_overrides` 可按活跃槽位编号覆盖 `batch_size` 和 `max_batch_wait_ms`，数组第 0 项对应实例 0，未列出的实例继承模型级设置。所有实例从**同一个模型 ID 的全局 BOX 队列**取任务；空闲实例按各自的批大小取队首请求，达到其窗口时执行尾批，避免预先将 BOX 固定分片到繁忙实例。队列上限至少覆盖模型级与各实例设置中最大的批大小；静态 batch ONNX/ACL 权重必须与相应实例的设置匹配，不同尺寸的实例要有相容的模型形状。`batch_size: 1` 的槽位直接执行单条推理。若所有实例都设为 1，沿用无后台组批线程的有界 FIFO 实例租赁路径。同步路径的输入并发受 `box_workers` 限制；异步路径改由独立识别池供给模型队列。
 
 只有支持一次真实批量调用的后端接受 `batch_size>1`：ONNX、导出固定 batch 的 ACL OM、带显式 `batch_endpoint` 的 `http_json`、mock 及实现批量入口的 C ABI v2 插件。无批量能力的 C ABI v1/C++ 后端在初始化时报错，不会在组批后逐条串行执行。`vllm` 的 Chat Completions 单请求协议不接受一次多图多任务批量调用；请保持框架 `batch_size=1`，用 `max_concurrent_requests` 向同一服务发出并发请求，在 vLLM 服务中配置其自身的连续批处理容量。组批窗口会增加低负载单请求延迟；批大小也不是并发槽位或 vLLM `max_num_seqs` 的别名。
 
@@ -124,7 +159,7 @@ v1 顶层和 v2 顶层都可设置 `postprocess`，所有开关默认为 `false`
 
 在 v2 配置中把相同参数写到 `executors.<id>`，多个 model binding 共用这一批队列。原有 v2 `max_inflight` 仍映射到 `instances`，可以另设 `max_concurrent_requests` 调整实际在途上限。将不同任务绑定到同一执行池前须确认该模型、prompt 与返回协议兼容。
 
-vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 每个槽位复用自己的连接，不在多个线程同时使用同一客户端；实际在途上限还受 REST 的 `--box-workers`（默认 1）或批处理的 `options.box_workers`、BOX 数及后端自身容量约束。单文件 CLI 使用 `execution.workers`，详见 [并发与性能](performance.md)。
+vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后面的实际模型数由服务部署控制。连接不同部署可定义多个模型 ID 或使用服务端负载均衡地址。内置 HTTP/vLLM 每个槽位复用自己的连接，不在多个线程同时使用同一客户端；同步路径实际在途上限还受 REST 的 `--box-workers`（默认 1）或批处理的 `options.box_workers`、BOX 数及后端自身容量约束；异步识别时 BOX 线程不再等待 HTTP，识别线程数是另一项上限。单文件 CLI 使用 `execution.workers`，详见 [并发与性能](performance.md)。
 
 ## vLLM
 
@@ -166,6 +201,10 @@ vLLM/HTTP 的并发槽位不会创建远端模型副本；同一个 endpoint 后
 | `max_wait_ms` | 低负载下最多等待这么久凑候选请求，默认 2 ms，范围 0–1000，必须小于 `acquire_timeout_ms`；队首到时优先服务以免某桶长期饥饿。 |
 
 `GET /v1/metrics` 包含 `visual_bucket_mode`、`visual_selected_capture_size`（最近一次规划的目标形状）、`visual_dynamic_bucket_ranges` 和 `visual_dynamic_bucket_sizes`（最近扫描窗口的临时桶区间和数量）、`visual_dynamic_bucket_dispatched`（累计按临时桶**相对序号**计数）、`visual_dynamic_splits_total`、`visual_bucket_fairness_forced_total`、`visual_waves_total`、`visual_wave_requests_total`、`queued`、`inflight` 与 `queue_wait_ms_total`。临时桶边界每波可变化，累计序号不代表固定的 token 区间。`visual_bucket_dispatched` 仍按手填的静态 `bucket_edges` 统计；未配置边界时只有一项，不要用它判断动态分桶是否生效。波次指标为**投递计划数**，请求失败或取消时可能不同于成功数。建议先用代表性的大小和输出长度分布，固定 `max_concurrent_requests` 做扫描，再交替 A/B 对比 `docs/min`、成功率、vLLM Running/Waiting、图像缓存命中与 p95 排队时间；这是启发式调度，无法仅由静态配置推算全局最优吞吐。`box_workers`、页面与文档 worker 必须能持续提供请求。
+
+新增累计诊断：`visual_capture_size_histogram` 按每次规划选中的 capture size 计数，`visual_wave_size_histogram` 按实际计划投递数计数，`visual_candidate_count_histogram` 按规划时模型等待队列数量向上取 2 的幂分箱（键为箱上界）。这些 JSON 对象是独立箱计数，不是 Prometheus 累计桶；每个对象的计数和等于 `visual_waves_total`。`visual_selected_capture_size` 仍只是最近一次值，收尾时为 1 不代表全程为 1。波次计数不等于 vLLM 实际推理批次。
+
+每个模型新增 `successful_total = completed_total - failed_total`，`failure_counts` 分为 `http_<状态码>`、`http_timeout`、`http_connection`、`http_response_limit`、`http_transport`、`cancelled` 和 `model_error`；排队拒绝/超时仍走既有准入统计，不计为已完成后端尝试。`backend_calls_total/backend_latency_ms_total` 统计取得槽位后的调用尝试，原生批次算一次调用。`usage_samples_total`、`actual_prompt_tokens_total`、`actual_completion_tokens_total` 来自成功调用的后端 usage；没有 usage 的调用不以估算数补齐，原生批次的 usage 由后端能力决定。路由适配器解码失败可能发生在后端成功后，应同时看识别池任务失败数。
 
 vLLM 参数需按实际服务版本核对：[调度器配置](https://docs.vllm.ai/en/latest/api/vllm/config/scheduler/)把 `max_num_batched_tokens` 定义为调度轮次 token 预算，`max_num_seqs` 控制序列容量；[CUDA graph 配置](https://docs.vllm.ai/en/latest/api/vllm/config/vllm/)中的 capture sizes 是图形状。框架只使用手动快照，不自动修改或抓取服务端配置。
 

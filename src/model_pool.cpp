@@ -57,6 +57,8 @@ struct ModelRegistry::Impl {
         uint64_t visual_dynamic_splits_total = 0;
         uint64_t visual_bucket_fairness_forced_total = 0;
         size_t visual_selected_capture_size = 0;
+        std::map<std::string, uint64_t> visual_capture_histogram, visual_wave_size_histogram;
+        std::map<std::string, uint64_t> visual_candidate_histogram;
         std::vector<std::array<size_t, 2>> visual_dynamic_bucket_ranges;
         std::vector<size_t> visual_dynamic_bucket_sizes;
         std::vector<uint64_t> visual_dynamic_bucket_dispatched;
@@ -89,6 +91,10 @@ struct ModelRegistry::Impl {
         uint64_t control_epoch = 0, throughput_backoff_total = 0;
         size_t stale_inflight = 0;
         uint64_t completed_total = 0, failed_total = 0, overload_total = 0;
+        std::map<std::string, uint64_t> failure_counts;
+        uint64_t backend_calls_total = 0, usage_samples_total = 0;
+        uint64_t actual_prompt_tokens_total = 0, actual_completion_tokens_total = 0;
+        double backend_latency_ms_total = 0;
         uint64_t completed_normalized_work_total = 0;
         uint64_t pressure_total = 0, acquisition_timeout_total = 0;
         double queue_wait_ms_total = 0;
@@ -293,9 +299,39 @@ struct ModelRegistry::Impl {
                     if (waiter.bucket != chosen) append(waiter);
             }
             if (!dispatch_wave.empty()) {
+                ++visual_capture_histogram[std::to_string(dynamic_visual_buckets ? visual_selected_capture_size : target)];
+                ++visual_wave_size_histogram[std::to_string(dispatch_wave.size())];
+                size_t bin = 1;
+                while (bin < scalar_queue.size() && bin < 1048576) bin *= 2;
+                ++visual_candidate_histogram[std::to_string(bin)];
                 ++waves_total;
                 wave_requests_total += dispatch_wave.size();
                 wave_prefill_total += work;
+            }
+        }
+        void note_failure(std::exception_ptr error, size_t count = 1) {
+            std::string kind = "model_error";
+            try { std::rethrow_exception(error); }
+            catch (const Cancelled&) { kind = "cancelled"; }
+            catch (const HttpStatusError& e) { kind = "http_" + std::to_string(e.status); }
+            catch (const HttpTransportError& e) {
+                kind = e.kind == HttpTransportError::Timeout ? "http_timeout" :
+                    e.kind == HttpTransportError::Connection ? "http_connection" :
+                    e.kind == HttpTransportError::ResponseLimit ? "http_response_limit" : "http_transport";
+            } catch (...) {}
+            std::lock_guard<std::mutex> guard(mutex);
+            failure_counts[kind] += count;
+        }
+        void observe_backend(size_t index, bool success, double ms) {
+            const size_t total = success ? models[index]->last_usage_tokens() : 0;
+            const size_t output = success ? models[index]->last_completion_tokens() : 0;
+            std::lock_guard<std::mutex> guard(mutex);
+            ++backend_calls_total;
+            backend_latency_ms_total += ms;
+            if (total && total >= output) {
+                ++usage_samples_total;
+                actual_prompt_tokens_total += total - output;
+                actual_completion_tokens_total += output;
             }
         }
         bool fits(size_t tokens) const {
@@ -476,6 +512,11 @@ struct ModelRegistry::Impl {
                     {"throughput_backoff_total", throughput_backoff_total},
                     {"budget_pressure_total", budget_pressure_total},
                     {"completed_total", completed_total}, {"failed_total", failed_total},
+                    {"successful_total", completed_total - failed_total}, {"failure_counts", failure_counts},
+                    {"backend_calls_total", backend_calls_total}, {"backend_latency_ms_total", backend_latency_ms_total},
+                    {"usage_samples_total", usage_samples_total},
+                    {"actual_prompt_tokens_total", actual_prompt_tokens_total},
+                    {"actual_completion_tokens_total", actual_completion_tokens_total},
                     {"completed_normalized_work_total", completed_normalized_work_total},
                     {"overload_total", overload_total}, {"pressure_total", pressure_total},
                     {"acquisition_timeout_total", acquisition_timeout_total},
@@ -490,6 +531,9 @@ struct ModelRegistry::Impl {
                     {"visual_bucket_mode", visual_scheduler ?
                         (dynamic_visual_buckets ? "adaptive" : "static") : "off"},
                     {"visual_selected_capture_size", visual_selected_capture_size},
+                    {"visual_capture_size_histogram", visual_capture_histogram},
+                    {"visual_wave_size_histogram", visual_wave_size_histogram},
+                    {"visual_candidate_count_histogram", visual_candidate_histogram},
                     {"visual_dynamic_splits_total", visual_dynamic_splits_total},
                     {"visual_bucket_fairness_forced_total", visual_bucket_fairness_forced_total},
                     {"visual_dynamic_bucket_ranges", visual_dynamic_bucket_ranges},
@@ -533,6 +577,7 @@ struct ModelRegistry::Impl {
                 std::vector<Json> responses;
                 std::exception_ptr error;
                 bool overloaded = false;
+                const auto backend_start = std::chrono::steady_clock::now();
                 try {
                     std::vector<Model::BatchInput> inputs;
                     inputs.reserve(batch.size());
@@ -548,6 +593,9 @@ struct ModelRegistry::Impl {
                 } catch (...) {
                     error = std::current_exception();
                 }
+                if (error) note_failure(error, batch.size());
+                observe_backend(index, !error, std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - backend_start).count());
                 {
                     std::lock_guard<std::mutex> guard(mutex);
                     inflight -= batch.size();
@@ -703,6 +751,14 @@ struct ModelRegistry::Impl {
                     pool.ready.notify_all();
                 }
             } lease{*this, index, waiter.visual};
+            struct Observation {
+                Pool& pool; size_t index; bool success = false;
+                std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+                ~Observation() {
+                    pool.observe_backend(index, success, std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count());
+                }
+            } observation{*this, index};
             if (!adaptive) {
                 try {
                     throw_if_cancelled();
@@ -712,11 +768,13 @@ struct ModelRegistry::Impl {
                     const auto output = models[index]->last_completion_tokens();
                     if (output) lease.work = lease.work - size_t(expected_output_tokens) + output;
                     lease.failed = false;
+                    observation.success = true;
                     return response;
                 } catch (const HttpStatusError& e) {
                     lease.overloaded = e.status == 429 || e.status == 503;
+                    note_failure(std::current_exception());
                     throw;
-                }
+                } catch (...) { note_failure(std::current_exception()); throw; }
             }
             const auto start = std::chrono::steady_clock::now();
             bool failed = false, overloaded = false;
@@ -737,13 +795,15 @@ struct ModelRegistry::Impl {
                 throw_if_cancelled();
                 auto response = models[index]->infer(*input, prompt);
                 throw_if_cancelled();
+                observation.success = true;
                 return response;
             }
             catch (const HttpStatusError& e) {
                 failed = true;
                 overloaded = e.status == 429 || e.status == 503;
+                note_failure(std::current_exception());
                 throw;
-            } catch (...) { failed = true; throw; }
+            } catch (...) { failed = true; note_failure(std::current_exception()); throw; }
         }
         void start() {
             if (!batching) return;
