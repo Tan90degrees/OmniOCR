@@ -31,12 +31,12 @@ Json HttpClient::post(const Json& payload) {
     const auto& curl = impl_->curl;
     const auto url = settings.at("endpoint").get<std::string>();
     const auto body = payload.dump();
-    struct Response { std::string body; size_t limit; } response{{}, settings.value("max_response_bytes", size_t(16777216))};
+    struct Response { std::string body; size_t limit; bool exceeded = false; } response{{}, settings.value("max_response_bytes", size_t(16777216))};
     auto receive = +[](char* ptr, size_t size, size_t nmemb, void* user) -> size_t {
         auto& r = *static_cast<Response*>(user);
         if (size && nmemb > std::numeric_limits<size_t>::max() / size) return 0;
         const size_t bytes = size * nmemb;
-        if (bytes > r.limit - r.body.size()) return 0;
+        if (bytes > r.limit - r.body.size()) { r.exceeded = true; return 0; }
         try { r.body.append(ptr, bytes); } catch (...) { return 0; }
         return bytes;
     };
@@ -80,7 +80,14 @@ Json HttpClient::post(const Json& payload) {
         });
     const auto rc = curl_easy_perform(curl.get());
     if (rc == CURLE_ABORTED_BY_CALLBACK && cancellation_requested()) throw Cancelled();
-    if (rc != CURLE_OK) throw std::runtime_error(std::string("HTTP transport failed: ") + curl_easy_strerror(rc));
+    if (rc != CURLE_OK) {
+        const auto kind = response.exceeded ? HttpTransportError::ResponseLimit :
+            rc == CURLE_OPERATION_TIMEDOUT ? HttpTransportError::Timeout :
+            (rc == CURLE_COULDNT_CONNECT || rc == CURLE_COULDNT_RESOLVE_HOST ||
+             rc == CURLE_SEND_ERROR || rc == CURLE_RECV_ERROR || rc == CURLE_GOT_NOTHING) ?
+                HttpTransportError::Connection : HttpTransportError::Other;
+        throw HttpTransportError(kind, std::string("HTTP transport failed: ") + curl_easy_strerror(rc));
+    }
     long status = 0; curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
     if (status < 200 || status >= 300) throw HttpStatusError(status);
     return Json::parse(response.body);

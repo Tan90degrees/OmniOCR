@@ -629,7 +629,8 @@ public:
                 {"admitted_total", admitted_}, {"succeeded_total", succeeded_},
                 {"failed_total", failed_}, {"cancelled_total", cancelled_},
                 {"rejected_total", rejected_},
-                {"models", pipeline_.model_metrics()}};
+                {"models", pipeline_.model_metrics()},
+                {"recognition", pipeline_.recognition_metrics()}};
     }
     fs::path result_file(const std::string& id, const std::string& format) {
         std::lock_guard<std::mutex> guard(mutex_);

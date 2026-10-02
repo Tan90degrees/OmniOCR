@@ -399,12 +399,26 @@ void validate_config(const Json& c) {
     require(exec.is_object(), "execution must be an object");
     for (const auto& [key, value] : exec.items())
         require(std::set<std::string>{"workers", "page_workers", "box_workers", "document_workers",
-                                      "max_queued_pages", "on_error"}.count(key), "unknown execution setting: " + key);
+                                      "max_queued_pages", "on_error", "async_recognition"}.count(key), "unknown execution setting: " + key);
     positive(exec, "workers", 4, 128);
     positive(exec, "page_workers", exec.value("workers", 4), 128);
     positive(exec, "box_workers", 1, 128);
     positive(exec, "document_workers", 2, 32);
     positive(exec, "max_queued_pages", 2, 256);
+    if (exec.contains("async_recognition")) {
+        const auto& settings = exec.at("async_recognition");
+        require(settings.is_object(), "async_recognition must be an object");
+        for (const auto& [key, value] : settings.items())
+            require(std::set<std::string>{"enabled", "workers", "max_requests", "max_bytes",
+                                          "enqueue_timeout_ms"}.count(key),
+                    "unknown async_recognition setting: " + key);
+        if (settings.contains("enabled"))
+            require(settings.at("enabled").is_boolean(), "async_recognition.enabled must be boolean");
+        bounded(settings, "workers", 1, 256);
+        bounded(settings, "max_requests", 1, 1000000);
+        bounded(settings, "max_bytes", 1, 1ULL << 40);
+        bounded(settings, "enqueue_timeout_ms", 1, 3600000);
+    }
     require(exec.value("on_error", "fail") == "fail" || exec.value("on_error", "fail") == "record", "invalid on_error");
     const auto server = c.value("server", Json::object());
     require(server.is_object(), "server must be an object");

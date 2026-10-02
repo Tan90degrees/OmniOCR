@@ -147,3 +147,7 @@ ARM64 离线包在启用服务端构建的工作流通过后包含 `server.sh`�
 ## 相关文档
 
 [REST 演示](getting-started.md#启动-rest-演示) · [输入格式](input-formats.md) · [调度原理](architecture.md)
+
+### 异步候选供给
+
+`execution.async_recognition` 的字段、内存边界及三类超时见[配置说明](configuration.md#异步-box-识别可选)。开启后 `--box-workers` 控制准备线程，识别线程与模型 HTTP 槽位分别配置；`/v1/metrics` 的顶层 `recognition` 能观察候选供给和背压。CLI 覆盖 BOX 线程数不会覆盖识别池配置。

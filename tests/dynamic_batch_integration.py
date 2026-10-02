@@ -51,7 +51,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def run(binary):
+def run(binary, async_recognition=False):
     backend = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     backend.daemon_threads = True
     backend.lock = threading.Lock()
@@ -74,6 +74,9 @@ def run(binary):
                         'endpoint': f'http://127.0.0.1:{backend.server_port}/single',
                         'batch_endpoint': f'http://127.0.0.1:{backend.server_port}/batch'}},
                 'routes': {'title': {'model': 'ocr'}, 'text': {'model': 'ocr'}}}
+            if async_recognition:
+                config['execution'] = {'async_recognition': {'enabled': True, 'workers': 16,
+                    'max_requests': 32, 'max_bytes': 1048576}}
             (root/'config.json').write_text(json.dumps(config))
             for i in range(8):
                 top = bytes([i+10, 0, 0]) * (16 * 8)
@@ -145,8 +148,8 @@ def run(binary):
                     assert proc.returncode == 0, proc.returncode
     finally:
         backend.shutdown(); backend.server_close(); thread.join()
-    print('PASS: cross-file and single-page BOX batches preserve ordered results')
+    print('PASS: ' + ('async ' if async_recognition else '') + 'cross-file and single-page BOX batches preserve ordered results')
 
 
 if __name__ == '__main__':
-    run(str(Path(sys.argv[1]).resolve()))
+    run(str(Path(sys.argv[1]).resolve()), '--async' in sys.argv[2:])
